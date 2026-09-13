@@ -251,6 +251,33 @@ impl Builder {
             v.sort_unstable();
             v.dedup();
         }
+
+        // 可规划性：排除 JEI 信息页类别
+        // - diagram：矿石处理流程图页（含机器催化剂等虚拟输入）
+        // - tag_recipes：标签成员列表页（一个巨槽列全部成员，不是真实转换）
+        // - *_info：结构/机器信息页（如 multiblock_info）
+        let plannable: Vec<bool> = self
+            .recipes
+            .iter()
+            .map(|r| {
+                let ty = &self.categories[r.category as usize].ty;
+                !ty.contains("diagram") && !ty.contains("tag_recipes") && !ty.ends_with("_info")
+            })
+            .collect();
+
+        // 可采集材料：存在"无输入但可规划"的配方（空气/水收集、抽水等）
+        let mut harvestable = vec![false; self.materials.len()];
+        for (rid, r) in self.recipes.iter().enumerate() {
+            if !plannable[rid] || !r.inputs.is_empty() || r.outputs.is_empty() {
+                continue;
+            }
+            for slot in &r.outputs {
+                for &(m, _) in &slot.alts {
+                    harvestable[m as usize] = true;
+                }
+            }
+        }
+
         let mut stats = self.stats;
         stats.material_count = self.materials.len();
         stats.recipe_count = self.recipes.len();
@@ -260,6 +287,8 @@ impl Builder {
         stats.produce_links = self.producers.iter().map(Vec::len).sum();
         stats.raw_material_count = self.producers.iter().filter(|v| v.is_empty()).count();
         stats.leaf_material_count = self.consumers.iter().filter(|v| v.is_empty()).count();
+        stats.plannable_recipe_count = plannable.iter().filter(|&&p| p).count();
+        stats.harvestable_material_count = harvestable.iter().filter(|&&h| h).count();
 
         KnowledgeGraph {
             strings: self.strings,
@@ -270,6 +299,8 @@ impl Builder {
             recipe_index: self.recipe_index,
             producers: self.producers,
             consumers: self.consumers,
+            plannable,
+            harvestable,
             meta: self.meta,
             stats,
         }

@@ -41,6 +41,10 @@ pub struct GraphStats {
     pub raw_material_count: usize,
     /// 无消费者材料（最终产物）。
     pub leaf_material_count: usize,
+    /// 可参与规划的配方数（排除 diagram 类信息页）。
+    pub plannable_recipe_count: usize,
+    /// 可"采集"材料数（存在无输入配方，如空气/水收集）。
+    pub harvestable_material_count: usize,
 }
 
 /// 生产知识图谱（Knowledge IR 的容器）。
@@ -58,6 +62,10 @@ pub struct KnowledgeGraph {
     pub producers: Vec<Vec<RecipeId>>,
     /// consumers[m] = 消耗材料 m 的配方（已排序去重）。
     pub consumers: Vec<Vec<RecipeId>>,
+    /// 配方是否可参与规划（false = diagram 类信息页，规划时忽略）。
+    pub plannable: Vec<bool>,
+    /// 材料是否可"采集"（存在无输入的可规划配方，如空气/水收集）。
+    pub harvestable: Vec<bool>,
     pub meta: DatasetMeta,
     pub stats: GraphStats,
 }
@@ -96,10 +104,26 @@ impl KnowledgeGraph {
         self.producers[id as usize].is_empty()
     }
 
-    /// 完整配方名：`<分类 type>/<配方 id>`。
+    /// 配方是否可参与规划。
+    pub fn is_plannable(&self, id: RecipeId) -> bool {
+        self.plannable[id as usize]
+    }
+
+    /// 配方是否属于"回收类"（拆解成品/工具回炉，锚点选择时降优先级）。
+    pub fn is_recycling(&self, id: RecipeId) -> bool {
+        let r = self.recipe(id);
+        self.category(r.category).ty.contains("recycling")
+    }
+
+    /// 完整配方名：配方 id 已含分类前缀时直接返回，否则补 `<分类 type>/`。
     pub fn recipe_full_id(&self, id: RecipeId) -> String {
         let r = self.recipe(id);
-        format!("{}/{}", self.category(r.category).ty, r.id)
+        let cat = &self.category(r.category).ty;
+        if r.id.starts_with(cat.as_str()) {
+            r.id.clone()
+        } else {
+            format!("{}/{}", cat, r.id)
+        }
     }
 
     /// 按精确键查找材料。
