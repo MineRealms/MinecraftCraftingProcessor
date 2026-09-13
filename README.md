@@ -76,15 +76,17 @@ cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 ## 开发阶段
 
 - [x] Phase 0 项目骨架 + 文档
-- [x] Phase 1 解析器 + Knowledge Graph + CLI stats（126MB JSON ~1.6s）
+- [x] Phase 1 解析器 + Knowledge Graph + CLI stats（57MB JSON ~1.5s）
 - [x] Phase 2 SCC / 剪枝 / 启发式 + 确定性展开
 - [x] Phase 3 Beam Search 规划器 + Plan IR
 - [x] Phase 4 Web API + 前端可视化（axum + cytoscape，含图谱筛选/分层布局）
-- [x] Phase 5 GPU 加速（wgpu）：候选批量评估（beam 粗筛，RTX 4060 实测）
-- [x] Phase 6a LP 精确求解（good_lp + microlp，物料平衡模型）
-- [ ] Phase 6b 多目标（材料/电耗/时间/机器数）+ Pareto 前沿
+- [x] Phase 5 GPU 加速（wgpu）：候选批量评估 + **CSR 线性求解器**（`gtp flow`）
+- [x] Phase 6 LP 精确求解（good_lp + microlp，OR 槽内决策 + MILP-lite 机器取整）
+- [x] Phase 7 过程优化升级：CostVector（物料/EU/机器时间）、SCC 凝聚图一级公民、
+      多目标预设（economy/power/speed）、Process IR 物料流图、概率产出覆盖层
+- [x] Phase 8 MCTS 规划模式（UCT）+ 多方案对比（`gtp pareto`）
+- [ ] Phase 9 未来：GPU simplex/interior-point、多根 MCTS、Pareto 前沿自动搜索
 
-实测（量子处理器 60/min，成本=原始物品当量）：
-tree 66.1 → beam(CPU) 30.6 → **beam(GPU) 29.3**；exact LP 目标值 38.99（Optimal）
+规划模式：`tree`（毫秒级）/ `beam`（GPU 粗筛 + CPU 局部搜索）/ `mcts`（蒙特卡洛树搜索）/ `exact`（LP 精确）
 
 详见 `docs/PLAN.md` 与 `docs/PROGRESS.md`（含数据踩坑记录）。

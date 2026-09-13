@@ -46,6 +46,7 @@
         <select id="plan-mode">
           <option value="tree">tree · 快速贪心</option>
           <option value="beam">beam · 局部搜索（推荐）</option>
+          <option value="mcts">mcts · 蒙特卡洛树搜索</option>
           <option value="exact">exact · LP 精确</option>
         </select>
         <select id="plan-tier" title="最大电压等级">
@@ -68,6 +69,7 @@
           <option value="speed">speed · 省时间</option>
         </select>
         <button id="plan-btn">生成计划</button>
+        <button id="plan-process" class="ghost">流程图</button>
       </div>
       <div id="plan-result" class="panel"><div class="placeholder">输入目标材料与速率，生成生产计划</div></div>
     </section>

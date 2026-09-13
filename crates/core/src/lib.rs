@@ -7,6 +7,7 @@
 
 pub mod algo;
 pub mod analysis;
+pub mod chances;
 pub mod error;
 pub mod graph;
 pub mod intern;
@@ -15,12 +16,14 @@ pub mod names;
 pub mod parser;
 pub mod plan;
 pub mod planner;
+pub mod process;
 pub mod raw;
 pub mod solver;
 pub mod util;
 
 pub use analysis::Analysis;
 pub use algo::{Condensation, CostVector, CostWeights};
+pub use chances::ChanceStore;
 pub use error::{Error, Result};
 pub use graph::{DatasetMeta, GraphStats, KnowledgeGraph};
 pub use model::{
@@ -30,8 +33,10 @@ pub use model::{
 pub use names::{NameEntry, NameStore};
 pub use plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
 pub use planner::{
-    plan_beam, plan_beam_with_evaluator, plan_tree, BatchEvaluator, BeamOptions, PlanRequest,
+    greedy_choices, plan_beam, plan_beam_with_evaluator, plan_mcts, plan_tree, BatchEvaluator, BeamOptions,
+    MctsOptions, PlanRequest,
 };
+pub use process::{ProcessFlow, ProcessGraph, ProcessStep};
 pub use solver::{plan_exact, ExactOptions};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

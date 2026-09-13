@@ -574,6 +574,7 @@ struct PlanReq {
     beam_width: Option<usize>,
     candidates: Option<usize>,
     max_iterations: Option<usize>,
+    mcts_iterations: Option<usize>,
     include_recycling: Option<bool>,
     block_amplification: Option<bool>,
     /// 最大电压等级（LV/MV/… 或数字）
@@ -582,82 +583,114 @@ struct PlanReq {
     objective: Option<String>,
 }
 
-async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
+/// 共享规划内核（在 spawn_blocking 里调用）。
+fn build_plan(state: &AppState, req: &PlanReq) -> Result<Plan, ApiError> {
     if !(req.rate.is_finite() && req.rate > 0.0) {
         return Err(bad_request("rate 必须是正数"));
     }
-    let mode = req.mode.unwrap_or_else(|| "tree".to_string());
-    if mode != "tree" && mode != "beam" && mode != "exact" {
-        return Err(bad_request("mode 只支持 tree / beam / exact"));
+    let mode = req.mode.clone().unwrap_or_else(|| "tree".to_string());
+    if mode != "tree" && mode != "beam" && mode != "mcts" && mode != "exact" {
+        return Err(bad_request("mode 只支持 tree / beam / mcts / exact"));
     }
-    let state = Arc::clone(&st);
-    let plan = tokio::task::spawn_blocking(move || {
-        let g = &state.graph;
-        let m = resolve_material(g, &req.material, req.kind.as_deref().and_then(kind_from_str), req.nbt.as_deref())?;
-        let max_tier = req.max_tier.as_deref().and_then(|s| {
-            s.trim()
-                .parse::<u8>()
-                .ok()
-                .or_else(|| gt_planner_core::util::tier_index_from_name(s))
-        });
-        // 多目标权重：非 balanced 时重建 Search IR（成本向量随权重变化）
-        let weights = match req.objective.as_deref() {
-            None => None,
-            Some(name) => Some(gt_planner_core::CostWeights::preset(name).ok_or_else(|| {
-                ApiError(
-                    StatusCode::BAD_REQUEST,
-                    format!("未知 objective \"{name}\"（balanced/economy/power/speed）"),
-                )
-            })?),
-        };
-        let custom_an = weights.map(|w| Analysis::build_with(g, 48, w));
-        let an: &Analysis = custom_an.as_ref().unwrap_or(&state.analysis);
-        let plan = match mode.as_str() {
-            "beam" => {
-                let opts = BeamOptions {
-                    beam_width: req.beam_width.unwrap_or(8),
-                    candidate_limit: req.candidates.unwrap_or(3),
-                    max_iterations: req.max_iterations.unwrap_or(12),
-                    sample_per_state: 24,
-                    ops_penalty: 0.001,
-                    max_tier,
-                };
-                // GPU 批量评估（不可用则回退 CPU）
-                match gt_planner_gpu::GpuEvaluator::new() {
-                    Ok(mut ev) => gt_planner_core::planner::plan_beam_with_evaluator(
-                        g, an, m, req.rate, &opts, Some(&mut ev),
-                    ),
-                    Err(e) => {
-                        eprintln!("{}；beam 使用 CPU 路径", e);
-                        plan_beam(g, an, m, req.rate, &opts)
-                    }
+    let g = &state.graph;
+    let m = resolve_material(
+        g,
+        &req.material,
+        req.kind.as_deref().and_then(kind_from_str),
+        req.nbt.as_deref(),
+    )?;
+    let max_tier = req.max_tier.as_deref().and_then(|s| {
+        s.trim()
+            .parse::<u8>()
+            .ok()
+            .or_else(|| gt_planner_core::util::tier_index_from_name(s))
+    });
+    // 多目标权重：非 balanced 时重建 Search IR（成本向量随权重变化）
+    let weights = match req.objective.as_deref() {
+        None => None,
+        Some(name) => Some(gt_planner_core::CostWeights::preset(name).ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("未知 objective \"{name}\"（balanced/economy/power/speed）"),
+            )
+        })?),
+    };
+    let custom_an = weights.map(|w| Analysis::build_with(g, 48, w));
+    let an: &Analysis = custom_an.as_ref().unwrap_or(&state.analysis);
+    let plan = match mode.as_str() {
+        "beam" => {
+            let opts = BeamOptions {
+                beam_width: req.beam_width.unwrap_or(8),
+                candidate_limit: req.candidates.unwrap_or(3),
+                max_iterations: req.max_iterations.unwrap_or(12),
+                sample_per_state: 24,
+                ops_penalty: 0.001,
+                max_tier,
+            };
+            // GPU 批量评估（不可用则回退 CPU）
+            match gt_planner_gpu::GpuEvaluator::new() {
+                Ok(mut ev) => gt_planner_core::planner::plan_beam_with_evaluator(
+                    g, an, m, req.rate, &opts, Some(&mut ev),
+                ),
+                Err(e) => {
+                    eprintln!("{}；beam 使用 CPU 路径", e);
+                    plan_beam(g, an, m, req.rate, &opts)
                 }
             }
-            "exact" => {
-                let opts = gt_planner_core::solver::ExactOptions {
-                    include_recycling: req.include_recycling.unwrap_or(false),
-                    block_amplification: req.block_amplification.unwrap_or(false),
-                    max_tier,
-                    ..Default::default()
-                };
-                gt_planner_core::solver::plan_exact(g, an, m, req.rate, &opts)
-                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?
-            }
-            _ => {
-                let preq = PlanRequest {
-                    target: m,
-                    rate_per_min: req.rate,
-                    max_ops: 200_000,
-                    max_tier,
-                };
-                plan_tree(g, an, &preq)
-            }
-        };
-        Ok::<Plan, ApiError>(plan)
+        }
+        "exact" => {
+            let opts = gt_planner_core::solver::ExactOptions {
+                include_recycling: req.include_recycling.unwrap_or(false),
+                block_amplification: req.block_amplification.unwrap_or(false),
+                max_tier,
+                ..Default::default()
+            };
+            gt_planner_core::solver::plan_exact(g, an, m, req.rate, &opts)
+                .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?
+        }
+        "mcts" => {
+            let opts = gt_planner_core::planner::MctsOptions {
+                iterations: req.mcts_iterations.unwrap_or(400),
+                candidate_limit: req.candidates.unwrap_or(3),
+                max_tier,
+                ..Default::default()
+            };
+            gt_planner_core::planner::plan_mcts(g, an, m, req.rate, &opts)
+        }
+        _ => {
+            let preq = PlanRequest {
+                target: m,
+                rate_per_min: req.rate,
+                max_ops: 200_000,
+                max_tier,
+            };
+            plan_tree(g, an, &preq)
+        }
+    };
+    Ok(plan)
+}
+
+async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
+    let state = Arc::clone(&st);
+    let plan = tokio::task::spawn_blocking(move || build_plan(&state, &req))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("规划任务失败: {e}")))??;
+    Ok(Json(plan))
+}
+
+/// Process IR：物料流图。
+async fn api_process(
+    State(st): St,
+    Json(req): Json<PlanReq>,
+) -> Result<Json<gt_planner_core::process::ProcessGraph>, ApiError> {
+    let state = Arc::clone(&st);
+    let pg = tokio::task::spawn_blocking(move || {
+        let plan = build_plan(&state, &req)?;
+        Ok::<_, ApiError>(gt_planner_core::process::ProcessGraph::from_plan(&plan))
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("规划任务失败: {e}")))??;
-    Ok(Json(plan))
+    Ok(Json(pg))
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +781,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/material/{id}", get(api_material))
         .route("/api/graph", get(api_graph))
         .route("/api/plan", post(api_plan))
+        .route("/api/process", post(api_process))
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

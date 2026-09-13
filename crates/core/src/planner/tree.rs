@@ -233,10 +233,10 @@ pub(crate) fn expand_tree(
             break;
         }
 
-        let ops_add = qty / mat_norm_qty(g, m, out_q);
+        let ops_add = qty / (mat_norm_qty(g, m, out_q) * g.output_chance(rid, m));
         ops[rid as usize] += ops_add;
 
-        // 其他输出：抵原料 → 抵需求 → 记副产物
+        // 其他输出：抵原料 → 抵需求 → 记副产物（概率产出按期望值计）
         for slot in &recipe.outputs {
             let Some((om, oq)) = slot.primary() else {
                 continue;
@@ -244,7 +244,7 @@ pub(crate) fn expand_tree(
             if om == m {
                 continue;
             }
-            let mut left = ops_add * mat_norm_qty(g, om, oq);
+            let mut left = ops_add * mat_norm_qty(g, om, oq) * g.output_chance(rid, om);
             if left <= EPS {
                 continue;
             }
@@ -353,7 +353,7 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
     let t0 = Instant::now();
     let mut res = expand_tree(g, an, req, &HashMap::new());
     res.notes
-        .push("JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
+        .push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
     super::assemble_plan(
         g,
         an,
@@ -376,4 +376,13 @@ pub(crate) fn expand_with_choices(
     choices: &HashMap<MaterialId, RecipeId>,
 ) -> TreeResult {
     expand_tree(g, an, req, choices)
+}
+
+/// 返回贪心展开的配方分配（供 GPU 线性求解 / 流量分析使用）。
+pub fn greedy_choices(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    req: &PlanRequest,
+) -> HashMap<MaterialId, RecipeId> {
+    expand_with_choices(g, an, req, &HashMap::new()).choices
 }

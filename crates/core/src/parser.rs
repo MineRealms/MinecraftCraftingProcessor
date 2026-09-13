@@ -340,6 +340,7 @@ impl Builder {
             plannable,
             harvestable,
             names: NameStore::default(),
+            chances: crate::chances::ChanceStore::default(),
             meta: self.meta,
             stats,
         }

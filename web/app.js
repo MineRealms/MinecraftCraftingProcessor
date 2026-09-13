@@ -298,6 +298,110 @@ async function runPlan() {
 }
 
 $("#plan-btn").addEventListener("click", runPlan);
+
+/** 加载并渲染 Process IR（物料流图） */
+async function loadProcess() {
+  const material = $("#plan-material").value.trim();
+  const rate = parseFloat($("#plan-rate").value);
+  const mode = $("#plan-mode").value;
+  if (!material || !(rate > 0)) return;
+  $("#graph-status").textContent = "生成流程图…";
+  switchTab("graph");
+  try {
+    const pg = await api("/api/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        material,
+        rate,
+        mode,
+        max_tier: $("#plan-tier").value || null,
+        objective: $("#plan-objective").value || null,
+      }),
+    });
+    renderProcess(pg);
+  } catch (e) {
+    $("#graph-status").textContent = "流程图失败：" + e.message;
+  }
+}
+
+function renderProcess(pg) {
+  const c = ensureCy();
+  lastGraph = null; // 流程图模式与材料图谱互斥
+  const maxStep = pg.steps.length;
+  // 步骤层级：原料 = 0；步骤 = 1 + max(输入步骤层级)
+  const stepIn = pg.steps.map(() => []);
+  pg.flows.forEach((f) => {
+    if (f.to_step != null && f.from_step != null) stepIn[f.to_step].push(f.from_step);
+  });
+  const level = new Array(maxStep).fill(0);
+  for (let it = 0; it < maxStep + 2; it++) {
+    let changed = false;
+    pg.steps.forEach((_, i) => {
+      let lv = 1;
+      stepIn[i].forEach((j) => { lv = Math.max(lv, level[j] + 1); });
+      if (lv > level[i] && lv <= maxStep) { level[i] = lv; changed = true; }
+    });
+    if (!changed) break;
+  }
+  const maxLevel = Math.max(1, ...level);
+  const yCount = new Map();
+  const pos = (lv) => {
+    const k = yCount.get(lv) || 0;
+    yCount.set(lv, k + 1);
+    return { x: lv * 240, y: k * 64 - 120 };
+  };
+  const nodes = [];
+  const edges = [];
+  const seen = new Set();
+  const matNode = (m, cls, lv, prefix) => {
+    const id = `${prefix}:${m.kind}:${m.id}:${m.nbt || ""}`;
+    if (!seen.has(id)) {
+      seen.add(id);
+      nodes.push({
+        data: { id, label: nm(m), mat_id: m.id, node_type: "material", material_kind: m.kind },
+        classes: cls,
+        position: pos(lv),
+      });
+    }
+    return id;
+  };
+  pg.raw_inputs.forEach((f) => {
+    const id = matNode(f.material, "ptype-raw", 0, "raw");
+    edges.push({ data: { id: `e:${id}->s${f.to_step}`, source: id, target: `s:${f.to_step}`, label: `${fmt(f.rate_per_min)}/min` }, classes: "flow" });
+  });
+  pg.steps.forEach((s, i) => {
+    const short = s.recipe.split("/").pop();
+    nodes.push({
+      data: { id: `s:${i}`, label: `${i + 1}. ${short}\n${fmt(s.ops_per_min)} op/min${s.machine_count != null ? ` · ${fmt(s.machine_count, 1)}台` : ""}`, node_type: "step" },
+      classes: "ptype-step",
+      position: pos(level[i]),
+    });
+  });
+  pg.flows.forEach((f, k) => {
+    if (f.from_step != null && f.to_step != null) {
+      edges.push({
+        data: { id: `f:${k}`, source: `s:${f.from_step}`, target: `s:${f.to_step}`, label: `${nm(f.material)} ${fmt(f.rate_per_min)}/min` },
+        classes: "flow",
+      });
+    } else if (f.from_step != null && f.to_step == null) {
+      const isTarget = f.material.id === pg.target.id;
+      const id = matNode(f.material, isTarget ? "ptype-target" : "ptype-byproduct", maxLevel + 1, isTarget ? "target" : "by");
+      edges.push({
+        data: { id: `f:${k}`, source: `s:${f.from_step}`, target: id, label: `${fmt(f.rate_per_min)}/min` },
+        classes: "flow",
+      });
+    }
+  });
+  c.startBatch();
+  c.elements().remove();
+  c.add([...nodes, ...edges]);
+  c.endBatch();
+  c.fit(c.elements(), 40);
+  $("#graph-status").textContent =
+    `流程图：${pg.steps.length} 步骤 / ${pg.flows.length} 内部流 / ${pg.raw_inputs.length} 原料 / ${pg.byproducts.length} 副产物`;
+}
+$("#plan-process").addEventListener("click", loadProcess);
 $("#plan-material").addEventListener("keydown", (e) => { if (e.key === "Enter") runPlan(); });
 
 // ---------------------------------------------------------------------------
@@ -372,6 +476,40 @@ function ensureCy() {
       {
         selector: "node.hit",
         style: { "border-width": 3, "border-color": "#ffd166", "border-opacity": 1 },
+      },
+      // Process IR（流程图）节点样式
+      {
+        selector: "node.ptype-step",
+        style: {
+          shape: "round-rectangle",
+          "background-color": "#ffb454",
+          "background-opacity": 0.9,
+          label: "data(label)",
+          color: "#1a1d26",
+          "font-size": "8px",
+          "text-valign": "center",
+          "text-max-width": "150px",
+          "text-wrap": "ellipsis",
+          width: 60,
+          height: 24,
+          "min-zoomed-font-size": 7,
+        },
+      },
+      {
+        selector: "node.ptype-raw",
+        style: { "background-color": "#37c9a0", shape: "ellipse" },
+      },
+      {
+        selector: "node.ptype-target",
+        style: { "background-color": "#b37feb", shape: "star", width: 30, height: 30 },
+      },
+      {
+        selector: "node.ptype-byproduct",
+        style: { "background-color": "#6b7488", shape: "diamond" },
+      },
+      {
+        selector: "edge.flow",
+        style: { label: "data(label)", "font-size": "6px", "line-color": "#4a5a75" },
       },
     ],
     wheelSensitivity: 0.2,

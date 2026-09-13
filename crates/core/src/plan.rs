@@ -54,6 +54,9 @@ pub struct PlannedRecipe {
 pub struct PlanEntry {
     pub material: MaterialDto,
     pub rate_per_min: f64,
+    /// 产出概率（< 1 时表示概率产出，速率已按期望值计）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chance: Option<f64>,
 }
 
 /// 计划汇总。

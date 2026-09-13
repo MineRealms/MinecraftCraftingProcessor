@@ -288,7 +288,7 @@ pub fn plan_exact(
                         lo
                     }
                 };
-                outputs.push((lo, oq as f64));
+                outputs.push((lo, oq as f64 * g.output_chance(rid, om)));
             }
             if outputs.is_empty() {
                 continue;
@@ -606,7 +606,7 @@ pub fn plan_exact(
             opts.max_materials, opts.max_recipes
         ));
     }
-    notes.push("JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
+    notes.push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
 
     Ok(super::planner::assemble_plan_with_choices(
         g,

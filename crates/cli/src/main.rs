@@ -23,6 +23,10 @@ struct Cli {
     #[arg(long, global = true)]
     names: Option<PathBuf>,
 
+    /// 概率产出覆盖表路径（默认：与配方同目录的 jei_chances.json，可选）
+    #[arg(long, global = true)]
+    chances: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -87,6 +91,32 @@ enum Command {
         #[arg(long)]
         max_tier: Option<String>,
     },
+    /// GPU 线性求解：物料平衡矩阵（固定贪心配方分配），展示流量解
+    Flow {
+        /// 材料 id
+        material: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        nbt: Option<String>,
+        /// 目标速率
+        #[arg(long, default_value_t = 60.0)]
+        rate: f64,
+        /// 迭代次数
+        #[arg(long, default_value_t = 200)]
+        iterations: u32,
+        /// 松弛因子 ω（1.0 = 标准 Jacobi，<1 抑制发散）
+        #[arg(long, default_value_t = 1.0)]
+        omega: f32,
+        /// 展示前 N 行（按操作量降序）
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+        #[arg(long)]
+        max_tier: Option<String>,
+        /// 强制 CPU 回退
+        #[arg(long)]
+        no_gpu: bool,
+    },
     /// 生产计划：每分钟造 N 个目标产物
     Plan {        /// 材料 id
         material: String,
@@ -97,7 +127,7 @@ enum Command {
         /// 目标速率（物品=个/分，流体=mB/分）
         #[arg(long, default_value_t = 60.0)]
         rate: f64,
-        /// 模式：tree（确定性展开）/ beam（局部搜索）/ exact（LP 精确求解）
+        /// 模式：tree（确定性展开）/ beam（局部搜索）/ mcts（蒙特卡洛树搜索）/ exact（LP 精确求解）
         #[arg(long, default_value = "tree")]
         mode: String,
         /// Beam 前沿宽度（保留的候选选择表数）
@@ -109,6 +139,9 @@ enum Command {
         /// Beam 局部搜索轮数
         #[arg(long, default_value_t = 12)]
         max_iterations: usize,
+        /// MCTS 模拟次数
+        #[arg(long, default_value_t = 400)]
+        mcts_iterations: usize,
         /// 展开操作上限（tree 模式）
         #[arg(long, default_value_t = 200_000)]
         max_ops: usize,
@@ -127,6 +160,9 @@ enum Command {
         /// 多目标预设：balanced / economy（省料）/ power（省电）/ speed（省时间）
         #[arg(long)]
         objective: Option<String>,
+        /// 额外输出 Process IR（物料流图）
+        #[arg(long)]
+        process: bool,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -150,6 +186,18 @@ fn resolve_names(data: &PathBuf, arg: Option<PathBuf>) -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
     let sibling = data.with_file_name("jei_names.json");
+    sibling.exists().then_some(sibling)
+}
+
+/// 概率覆盖表解析（可选）：显式参数 > 环境变量 > 与配方同目录的 jei_chances.json。
+fn resolve_chances(data: &PathBuf, arg: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = arg {
+        return p.exists().then_some(p);
+    }
+    if let Some(p) = std::env::var_os("GTP_CHANCES").map(PathBuf::from) {
+        return p.exists().then_some(p);
+    }
+    let sibling = data.with_file_name("jei_chances.json");
     sibling.exists().then_some(sibling)
 }
 
@@ -197,7 +245,11 @@ fn kind_from_str(s: &str) -> Option<MaterialKind> {
     }
 }
 
-fn load(data: &PathBuf, names: Option<&PathBuf>) -> Result<KnowledgeGraph, Box<dyn std::error::Error>> {
+fn load(
+    data: &PathBuf,
+    names: Option<&PathBuf>,
+    chances: Option<&PathBuf>,
+) -> Result<KnowledgeGraph, Box<dyn std::error::Error>> {
     if !data.exists() {
         return Err(format!(
             "找不到数据文件：{}\n提示：用 --data <路径> 指定，或设置环境变量 GTP_DATA",
@@ -208,17 +260,22 @@ fn load(data: &PathBuf, names: Option<&PathBuf>) -> Result<KnowledgeGraph, Box<d
     let size_mb = std::fs::metadata(data)?.len() as f64 / 1_048_576.0;
     eprintln!("读取 {} ({:.1} MB) ...", data.display(), size_mb);
     let t0 = Instant::now();
-    let g = match names {
+    let mut g = match names {
         Some(np) => {
             eprintln!("读取名称库 {} ...", np.display());
             gt_planner_core::parser::load_with_names(data, np)?
         }
         None => gt_planner_core::parser::load_file(data)?,
     };
+    if let Some(cp) = chances {
+        eprintln!("读取概率覆盖表 {} ...", cp.display());
+        g.chances = gt_planner_core::ChanceStore::load(cp)?;
+    }
     eprintln!(
-        "解析 + 构图完成，用时 {:.2}s（名称 {} 条）",
+        "解析 + 构图完成，用时 {:.2}s（名称 {} 条 / 概率覆盖 {} 条）",
         t0.elapsed().as_secs_f64(),
-        g.names.len()
+        g.names.len(),
+        g.chances.len()
     );
     Ok(g)
 }
@@ -566,10 +623,12 @@ fn cmd_plan(
     beam_width: usize,
     candidates: usize,
     max_iterations: usize,
+    mcts_iterations: usize,
     include_recycling: bool,
     block_amplification: bool,
     no_gpu: bool,
     max_tier: Option<u8>,
+    show_process: bool,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -624,8 +683,17 @@ fn cmd_plan(
             gt_planner_core::solver::plan_exact(g, an, m, rate, &opts)
                 .map_err(|e| format!("exact 求解失败: {e}"))?
         }
+        "mcts" => {
+            let opts = gt_planner_core::planner::MctsOptions {
+                iterations: mcts_iterations,
+                candidate_limit: candidates,
+                max_tier,
+                ..Default::default()
+            };
+            gt_planner_core::planner::plan_mcts(g, an, m, rate, &opts)
+        }
         other => {
-            return Err(format!("不支持的模式 \"{}\"（tree / beam / exact）", other).into());
+            return Err(format!("不支持的模式 \"{}\"（tree / beam / mcts / exact）", other).into());
         }
     };
 
@@ -739,6 +807,11 @@ fn cmd_plan(
         }
     }
 
+    if show_process {
+        let pg = gt_planner_core::process::ProcessGraph::from_plan(&plan);
+        print_process(&pg);
+    }
+
     if let Some(path) = json_out {
         let text = serde_json::to_string_pretty(&plan)?;
         std::fs::write(path, text)?;
@@ -749,16 +822,85 @@ fn cmd_plan(
     Ok(())
 }
 
+/// 渲染 Process IR（物料流图）为文本。
+fn print_process(pg: &gt_planner_core::process::ProcessGraph) {
+    println!();
+    println!("-- 工艺流程图（Process IR）--");
+    println!("步骤 ({}):", pg.steps.len());
+    for s in &pg.steps {
+        let extra = match (s.machine_count, s.tier.as_deref(), s.eu_t) {
+            (Some(mc), Some(t), Some(eu)) => format!("  [{:.1} 台 | {:.0} EU/t | {}]", mc, eu, t),
+            (Some(mc), _, _) => format!("  [{:.1} 台]", mc),
+            _ => String::new(),
+        };
+        println!(
+            "  #{:<3} {:>10} op/min  [{}] {}{}",
+            s.index + 1,
+            fmt_rate(s.ops_per_min),
+            s.category_title,
+            s.recipe,
+            extra
+        );
+    }
+    println!("流 ({}):", pg.flows.len());
+    for f in &pg.flows {
+        let from = match f.from_step {
+            Some(i) => format!("#{}", i + 1),
+            None => "[原料]".to_string(),
+        };
+        let to = match f.to_step {
+            Some(i) => format!("#{}", i + 1),
+            None => {
+                if f.material.id == pg.target.id {
+                    "(目标)".to_string()
+                } else {
+                    "(副产物)".to_string()
+                }
+            }
+        };
+        println!(
+            "  {} → {:>10}/min  {}  → {}",
+            from,
+            fmt_rate(f.rate_per_min),
+            f.material.id,
+            to
+        );
+    }
+    if !pg.raw_inputs.is_empty() {
+        println!("外部输入 ({}):", pg.raw_inputs.len());
+        for f in &pg.raw_inputs {
+            println!(
+                "  [原料] → {:>10}/min  {} → #{}",
+                fmt_rate(f.rate_per_min),
+                f.material.id,
+                f.to_step.map(|i| i + 1).unwrap_or(0)
+            );
+        }
+    }
+    if !pg.byproducts.is_empty() {
+        println!("副产物 ({}):", pg.byproducts.len());
+        for f in &pg.byproducts {
+            println!(
+                "  #{} → {:>10}/min  {}",
+                f.from_step.map(|i| i + 1).unwrap_or(0),
+                fmt_rate(f.rate_per_min),
+                f.material.id
+            );
+        }
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let data = resolve_data(cli.data.clone());
     let names = resolve_names(&data, cli.names.clone());
+    let chances = resolve_chances(&data, cli.chances.clone());
     match &cli.command {
         Command::Stats { top } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             cmd_stats(&g, *top);
         }
         Command::Find { query, limit, kind } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             cmd_find(&g, query, *limit, kind.as_deref());
         }
         Command::Info {
@@ -767,7 +909,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             limit,
         } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -783,7 +925,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             limit,
         } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -800,7 +942,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             mode,
             max_tier,
         } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -851,6 +993,114 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+        Command::Flow {
+            material,
+            kind,
+            nbt,
+            rate,
+            iterations,
+            omega,
+            top,
+            max_tier,
+            no_gpu,
+        } => {
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
+            let m = resolve_material(
+                &g,
+                material,
+                kind.as_deref().and_then(kind_from_str),
+                nbt.as_deref(),
+            )?;
+            let an = build_analysis(&g, gt_planner_core::CostWeights::default());
+            let mt = max_tier.as_deref().and_then(parse_max_tier);
+            let req = PlanRequest {
+                target: m,
+                rate_per_min: *rate,
+                max_ops: 200_000,
+                max_tier: mt,
+            };
+            // 贪心分配 → 评估子图 → 物料平衡线性系统
+            let choices = gt_planner_core::planner::greedy_choices(&g, &an, &req);
+            let sg = gt_planner_gpu::build_subgraph_from_plan(&g, &an, m, &choices, 3);
+            let mut demand = vec![0f32; sg.materials.len()];
+            if let Some(&ti) = sg.mat_index.get(&m) {
+                demand[ti] = *rate as f32;
+            }
+            let cand = gt_planner_gpu::CandidateTable::from_choices(&sg, &choices)
+                .ok_or("无法构建候选表（子图不完整）")?;
+            let sys = gt_planner_gpu::FlowSystem::from_candidate(&sg, &cand, &demand);
+
+            println!("== GPU 线性求解（物料平衡 A·x = rhs）==");
+            println!(
+                "材料 {} / 配方 {} / nnz {} / 迭代 {} / ω={}",
+                sg.materials.len(),
+                sg.recipes.len(),
+                sys.col_idx.len(),
+                iterations,
+                omega
+            );
+
+            let t0 = Instant::now();
+            let x = if *no_gpu {
+                sys.solve_cpu(*iterations, *omega)
+            } else {
+                match gt_planner_gpu::GpuFlowSolver::new() {
+                    Ok(solver) => {
+                        eprintln!("GPU 求解器就绪");
+                        solver
+                            .solve_batch(std::slice::from_ref(&sys), *iterations, *omega)
+                            .remove(0)
+                    }
+                    Err(e) => {
+                        eprintln!("{}；CPU 回退", e);
+                        sys.solve_cpu(*iterations, *omega)
+                    }
+                }
+            };
+            let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+
+            // 输出：按操作量降序
+            let consumed = sys.consumed(&x);
+            let mut rows: Vec<(usize, f32, f32, f32)> = (0..sys.n)
+                .map(|i| (i, x[i], sys.out_qty[i], consumed[i]))
+                .filter(|(_, xv, _, _)| *xv > 1e-6)
+                .collect();
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            println!();
+            println!(
+                "{:<45} {:>12} {:>10} {:>12}",
+                "材料", "操作量/min", "产出/op", "消耗/min"
+            );
+            for &(i, xv, oq, cons) in rows.iter().take(*top) {
+                let mid = g.material_id_str(sg.materials[i]);
+                let zh = g.names.zh_or(mid, mid);
+                println!(
+                    "{:<45} {:>12.4} {:>10.4} {:>12.4}",
+                    format!("{} ({})", mid, zh),
+                    xv,
+                    oq,
+                    cons
+                );
+            }
+            if rows.len() > *top {
+                println!("  ... 还有 {} 行", rows.len() - top);
+            }
+            let score = sys.score(&x, &sg.norm_factor, 0.001);
+            let max_x = x.iter().cloned().fold(0f32, f32::max);
+            println!();
+            println!(
+                "解：{} 行非零 / 得分 {:.4} / 耗时 {:.1} ms",
+                rows.len(),
+                score,
+                elapsed
+            );
+            if max_x > 1e6 {
+                println!(
+                    "⚠ 解发散（存在材料放大环）：最大操作量 {:.3e}；建议更小 ω 或改用 exact/beam 模式",
+                    max_x
+                );
+            }
+        }
         Command::Plan {
             material,
             kind,
@@ -860,16 +1110,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             beam_width,
             candidates,
             max_iterations,
+            mcts_iterations,
             max_ops,
             include_recycling,
             block_amplification,
             no_gpu,
             max_tier,
             objective,
+            process,
             verbose,
             json,
         } => {
-            let g = load(&data, names.as_ref())?;
+            let g = load(&data, names.as_ref(), chances.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -892,10 +1144,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 *beam_width,
                 *candidates,
                 *max_iterations,
+                *mcts_iterations,
                 *include_recycling,
                 *block_amplification,
                 *no_gpu,
                 mt,
+                *process,
                 *verbose,
                 json.as_ref(),
             )?;

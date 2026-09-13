@@ -227,3 +227,20 @@ web/ (零构建，原生 JS)
 - 用户提供的数据 schema 说明（见 §2）
 - 架构灵感：Factorio Helmod / EDA compiler（前端→IR→优化→后端）
 - GTCEu recipe 语义：AND-OR 超图，循环存在于化工链（电解、化工循环）
+
+## 8. M7–M9 落地补记（与初版设计的差异）
+
+| 主题 | 初版设计 | 落地实现 |
+|---|---|---|
+| 成本模型 | 标量 cost | **CostVector {material, eu, machine}** + 权重预设（balanced/economy/power/speed） |
+| EU/时长 | 覆盖层（无数据） | 数据源已含 `gt` 块：机器数 = ops×duration/1200、EU/t、等级；tier 过滤 |
+| SCC | 仅用于环检测 | **凝聚图一级公民**（`Condensation`：超节点 DAG、拓扑序、上下游） |
+| OR 槽 | 解析期贪心 | tree/beam 启发式选最便宜；**LP 内填充变量联合决策** |
+| 精确求解 | MILP/CP-SAT（未来） | **LP（good_lp+microlp）+ MILP-lite 机器取整**；OR 槽线性精确建模 |
+| GPU | 候选评估 | 候选批量评估（beam 粗筛）+ **CSR 松弛 Jacobi 线性求解器**（`gtp flow`） |
+| 搜索 | A*/Beam | tree / beam(CPU/GPU) / **MCTS（UCT）** / exact 四模式 |
+| 概率产出 | 无数据 | **`jei_chances.json` 覆盖层**，产出按期望值计入 tree/LP/Plan |
+| Plan IR | 配方清单 | 增加机器数/整数机器数/EU/tier/目标分；新增 **Process IR（物料流图）** 与前端流程图 |
+
+**已知边界**：纯物料模型下"放大环"（回收、转换增益）在 LP 与线性求解中仍可能被利用；
+对策 = 排除回收类 + 中间产物进口惩罚 + 发散检测与告警（见 PROGRESS M8/M9）。

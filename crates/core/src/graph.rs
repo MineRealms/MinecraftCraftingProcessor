@@ -69,6 +69,8 @@ pub struct KnowledgeGraph {
     pub harvestable: Vec<bool>,
     /// 名称库（jei_names.json；可为空）。
     pub names: NameStore,
+    /// 概率产出覆盖表（可选）。
+    pub chances: crate::chances::ChanceStore,
     pub meta: DatasetMeta,
     pub stats: GraphStats,
 }
@@ -137,6 +139,16 @@ impl KnowledgeGraph {
         } else {
             format!("{}/{}", cat, r.id)
         }
+    }
+
+    /// 产出概率（无覆盖表时恒为 1.0）。
+    pub fn output_chance(&self, rid: RecipeId, m: MaterialId) -> f64 {
+        if self.chances.is_empty() {
+            return 1.0;
+        }
+        let full = self.recipe_full_id(rid);
+        let mid = self.material_id_str(m);
+        self.chances.get(&full, mid)
     }
 
     /// 按精确键查找材料。

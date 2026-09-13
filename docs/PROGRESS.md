@@ -5,10 +5,9 @@
 
 ## 当前状态
 
-- 最新提交：`M8 过程优化升级：CostVector + 凝聚图 + LP 内 OR 决策`
+- 最新提交：`M9 P2 收官：Process IR / 概率覆盖 / MCTS / GPU 线性求解`
 - 编译状态：✅ `cargo build --workspace` + `cargo test`（14 个单测全过）
-- 真实数据验证：✅ 57MB JSON 解析 ~1.5s；分析 ~0.3s；tree ~1ms；beam(GPU) ~1.4s；exact ~0.7–2.5s
-- QP 60/min：tree 66.1（279 台）→ beam(GPU) 29.3 → exact 64.3（130 配方，2.5s，Optimal，原料=真实矿石）
+- 规划模式：tree（1ms）/ beam+GPU（1.4s）/ **mcts**（400 次模拟 ~100ms）/ exact（0.7–2.5s）
 
 ## 里程碑看板
 
@@ -72,6 +71,24 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M9 P2 收官（评审剩余项） ✅
+- [x] **Process IR**（`process.rs`）：物料流图——步骤节点（ops/机器/等级/EU）+ 流边（速率）+
+      外部输入/目标/副产物；`gtp plan --process` 文本渲染；`POST /api/process`；前端"流程图"按钮
+      （cytoscape 分层渲染，按流图自动分层）
+- [x] **副产物概率覆盖层**（`chances.rs`）：`jei_chances.json`（recipe/output/chance），
+      产出按期望值计入 tree/LP/Plan（PlanEntry 带 `chance` 字段）；无数据时明确注明"按 100% 计"
+- [x] **MCTS**（`planner/mcts.rs`）：UCT 平衡利用/探索，节点=配方分配、动作=单材料换配方、
+      评估=完整展开；保证不劣于 tree 基线；`--mode mcts --mcts-iterations N`；实测 300 次模拟 83ms，
+      得分 7192 → 69.6（balanced 权重）
+- [x] **GPU 线性求解器**（`gpu/linear.rs`）：CSR 稀疏矩阵 + `x ← x + ω·(rhs − A·x)` 松弛 Jacobi，
+      批量 dispatch（每候选一套系统）；`gtp flow` 命令直接展示物料平衡解；
+      发散检测（材料放大环）并给出 ω/模式建议
+- [x] 文档同步更新（PROGRESS/README/PLAN）
+
+**模型边界（如实记录）**：`gtp flow` 的固定贪心分配若包含"放大环"（如回收类），
+线性系统谱半径 > 1 会发散（ω<1 只能减缓）；评估器通过钳制 + 发散罚分处理，
+精确方案请用 exact（排除回收）/beam。
 
 ### M8 过程优化升级（响应外部评审的 P0/P1） ✅
 - [x] **P0 CostVector**：成本从标量升级为 `{material, eu, machine}` 三维向量；

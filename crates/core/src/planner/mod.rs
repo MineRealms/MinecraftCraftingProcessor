@@ -3,12 +3,14 @@
 //! 两种模式共享 Plan IR 组装（`assemble_plan`）。
 
 pub mod beam;
+pub mod mcts;
 pub mod tree;
 
 pub use beam::{
     plan_beam, plan_beam_with_evaluator, recipe_alternatives, BatchEvaluator, BeamOptions,
 };
-pub use tree::{plan_tree, PlanRequest};
+pub use mcts::{plan_mcts, MctsOptions};
+pub use tree::{greedy_choices, plan_tree, PlanRequest};
 
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
@@ -67,9 +69,18 @@ pub(crate) fn assemble_plan_with_choices(
     raw: &[(MaterialId, f64)],
     byproducts: &[(MaterialId, f64)],
     alt_choices: Option<&std::collections::HashMap<RecipeId, Vec<MaterialId>>>,
-    notes: Vec<String>,
+    mut notes: Vec<String>,
     elapsed_ms: f64,
 ) -> Plan {
+    // 概率产出说明
+    if g.chances.is_empty() {
+        notes.push("概率产出无数据（JEI 不导出），按 100% 计；可用 --chances 提供覆盖表".to_string());
+    } else {
+        notes.push(format!(
+            "已应用 {} 条概率覆盖（产出按期望值计）",
+            g.chances.len()
+        ));
+    }
     let mut planned: Vec<PlannedRecipe> = Vec::new();
     let mut total_machines = 0.0f64;
     let mut total_machines_int = 0u64;
@@ -127,6 +138,7 @@ pub(crate) fn assemble_plan_with_choices(
             inputs.push(PlanEntry {
                 material: g.material_dto(am),
                 rate_per_min: op * mat_norm_qty(g, am, aq),
+                chance: None,
             });
         }
         let mut outputs = Vec::new();
@@ -134,9 +146,11 @@ pub(crate) fn assemble_plan_with_choices(
             let Some((om, oq)) = slot.primary() else {
                 continue;
             };
+            let chance = g.output_chance(rid, om);
             outputs.push(PlanEntry {
                 material: g.material_dto(om),
-                rate_per_min: op * mat_norm_qty(g, om, oq),
+                rate_per_min: op * mat_norm_qty(g, om, oq) * chance,
+                chance: (chance < 1.0 - 1e-9).then_some(chance),
             });
         }
         planned.push(PlannedRecipe {
@@ -178,6 +192,7 @@ pub(crate) fn assemble_plan_with_choices(
         raw_entries.push(PlanEntry {
             material: g.material_dto(m),
             rate_per_min: qty,
+            chance: None,
         });
     }
     for &(m, qty) in byproducts {
@@ -187,6 +202,7 @@ pub(crate) fn assemble_plan_with_choices(
         byproduct_entries.push(PlanEntry {
             material: g.material_dto(m),
             rate_per_min: qty,
+            chance: None,
         });
     }
     raw_entries.sort_by(|a, b| {
@@ -200,8 +216,7 @@ pub(crate) fn assemble_plan_with_choices(
             .then_with(|| a.material.id.cmp(&b.material.id))
     });
 
-    let totals = PlanTotals {
-        distinct_recipes: planned.len(),
+    let totals = PlanTotals {        distinct_recipes: planned.len(),
         recipe_ops_per_min: planned.iter().map(|p| p.ops_per_min).sum(),
         raw_items_per_min: raw_items,
         raw_fluids_mb_per_min: raw_fluids,

@@ -380,7 +380,7 @@ pub fn plan_beam_with_evaluator(
             "（贪心基线已是最优）"
         }
     ));
-    notes.push("JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
+    notes.push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
 
     super::assemble_plan(
         g,

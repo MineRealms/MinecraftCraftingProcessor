@@ -5,7 +5,9 @@
 //! 物料平衡定点迭代（Gauss-Seidel 缩放），输出候选得分。
 
 pub mod eval;
+pub mod linear;
 pub mod subgraph;
 
 pub use eval::{GpuEvaluator, GpuUnavailable};
-pub use subgraph::{CandidateTable, SubgraphData};
+pub use linear::{FlowSystem, GpuFlowSolver};
+pub use subgraph::{build_subgraph_from_plan, CandidateTable, SubgraphData};
