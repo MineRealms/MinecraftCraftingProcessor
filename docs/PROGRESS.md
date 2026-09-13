@@ -5,9 +5,9 @@
 
 ## 当前状态
 
-- 最新提交：`M0 骨架与文档`
-- 编译状态：✅ `cargo check`（M0 时点）
-- 真实数据验证：⬜ 尚未跑通 54MB 数据集
+- 最新提交：`M1 解析器 + Knowledge IR + gtp stats`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（8 个单测全过）
+- 真实数据验证：✅ 126MB JSON 解析 13.3s（debug），统计与 JSON summary 一致
 
 ## 里程碑看板
 
@@ -20,13 +20,15 @@
 - [x] .gitignore
 - [x] 首次提交 + `cargo check` 验证
 
-### M1 解析器 + Knowledge IR ⬜
-- [ ] `model.rs`：MaterialKey / Slot / RecipeNode / CategoryInfo / 字符串驻留
-- [ ] `parser.rs`：serde 直读 → IR 构建（含 NBT / OR 槽 / 空槽跳过）
-- [ ] `graph.rs`：生产者/消费者索引 + GraphStats
-- [ ] CLI `gtp stats`：解析真实数据，统计与 JSON summary 对照
-- [ ] 合成 fixture 单元测试
-- [ ] 提交 + 编译验证 + 真实数据冒烟
+### M1 解析器 + Knowledge IR ✅
+- [x] `model.rs`：MaterialKey / Slot / RecipeNode / CategoryInfo / 字符串驻留
+- [x] `parser.rs`：serde 直读 → IR 构建（含 NBT / OR 槽 / 空槽跳过）
+- [x] `graph.rs`：生产者/消费者索引 + GraphStats + DatasetMeta
+- [x] CLI `gtp stats` / `gtp find`：解析真实数据，统计与 JSON summary 对照
+- [x] 合成 fixture 单元测试（8 个）
+- [x] 提交 + 编译验证 + 真实数据冒烟
+
+**实测数据（126MB 缩进版）**：解析+构图 13.3s（debug）；30,145 材料（item 29,508 / fluid 637）、19,909 个 NBT 变体、55,582 配方（与 summary 一致）、消耗/产出链接 377,176 / 113,482、原料 1,876、叶子 17,016、空配方 0。
 
 ### M2 图算法 + 确定性展开 ⬜
 - [ ] `algo/scc.rs`：迭代版 Tarjan
