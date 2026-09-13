@@ -145,7 +145,12 @@ mod tests {
         let g = from_json_str(FIXTURE).unwrap();
         let (n, adj) = build_adjacency(&g);
         let scc = tarjan(n, &adj);
-        let db = crate::algo::cost::build(&g, &scc, 32);
+        let db = crate::algo::cost::build(
+            &g,
+            &crate::algo::condensation::Condensation::build(&g, &scc),
+            32,
+            crate::algo::cost::CostWeights::default(),
+        );
         let dom = dominance_pruning(&g, &db.unit_cost);
 
         let good = g.recipe_index[&(0, "test:craft/good".to_string())];

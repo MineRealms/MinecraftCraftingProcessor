@@ -40,8 +40,39 @@ pub(crate) fn assemble_plan(
     notes: Vec<String>,
     elapsed_ms: f64,
 ) -> Plan {
+    assemble_plan_with_choices(
+        g,
+        an,
+        target,
+        rate_per_min,
+        mode,
+        ops,
+        raw,
+        byproducts,
+        None,
+        notes,
+        elapsed_ms,
+    )
+}
+
+/// 带 OR 槽选择覆盖的组装（exact 模式用 LP 的决定）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_plan_with_choices(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    target: MaterialId,
+    rate_per_min: f64,
+    mode: &str,
+    ops: &[(RecipeId, f64)],
+    raw: &[(MaterialId, f64)],
+    byproducts: &[(MaterialId, f64)],
+    alt_choices: Option<&std::collections::HashMap<RecipeId, Vec<MaterialId>>>,
+    notes: Vec<String>,
+    elapsed_ms: f64,
+) -> Plan {
     let mut planned: Vec<PlannedRecipe> = Vec::new();
     let mut total_machines = 0.0f64;
+    let mut total_machines_int = 0u64;
     let mut consume_eu_t = 0.0f64;
     let mut generate_eu_t = 0.0f64;
     let mut net_eu_per_min = 0.0f64;
@@ -52,7 +83,7 @@ pub(crate) fn assemble_plan(
         let r = g.recipe(rid);
         let cat = g.category(r.category);
         // GT 数据：机器数 / EU
-        let (machine_count, eut, tier, eu_per_min) = match &r.gt {
+        let (machine_count, machine_count_int, eut, tier, eu_per_min) = match &r.gt {
             Some(gt) => {
                 let machines = if gt.duration_ticks > 0 {
                     op * gt.duration_ticks as f64 / 1200.0
@@ -61,26 +92,36 @@ pub(crate) fn assemble_plan(
                 };
                 if gt.consumes_energy() {
                     total_machines += machines;
+                    total_machines_int += machines.ceil() as u64;
                     consume_eu_t += machines * gt.total_eu_t;
                     net_eu_per_min += op * gt.total_eu;
                 } else if gt.generates_energy() {
                     total_machines += machines;
+                    total_machines_int += machines.ceil() as u64;
                     generate_eu_t += machines * gt.total_eu_t;
                     net_eu_per_min -= op * gt.total_eu;
                 }
                 (
                     Some(machines),
+                    Some(machines.ceil() as u64),
                     Some(gt.total_eu_t),
                     gt.tier.clone(),
                     Some(op * gt.total_eu),
                 )
             }
-            None => (None, None, None, None),
+            None => (None, None, None, None, None),
         };
         let mut inputs = Vec::new();
-        for slot in &r.inputs {
-            let Some((am, aq)) = cheapest_alt(g, &an.cost.unit_cost, Some(&an.cost.cyclic), slot)
-            else {
+        for (si, slot) in r.inputs.iter().enumerate() {
+            // LP 决定的 OR 槽选择优先
+            let picked: Option<(MaterialId, u64)> = alt_choices
+                .and_then(|ch| ch.get(&rid))
+                .and_then(|picks| picks.get(si))
+                .and_then(|&m| slot.alts.iter().find(|&&(am, _)| am == m).copied());
+            let alt = picked.or_else(|| {
+                cheapest_alt(g, &an.cost.unit_cost, Some(&an.cost.cyclic), slot)
+            });
+            let Some((am, aq)) = alt else {
                 continue;
             };
             inputs.push(PlanEntry {
@@ -104,6 +145,7 @@ pub(crate) fn assemble_plan(
             category_title: cat.title.clone(),
             ops_per_min: op,
             machine_count,
+            machine_count_int,
             eut,
             tier,
             eu_per_min,
@@ -165,10 +207,14 @@ pub(crate) fn assemble_plan(
         raw_fluids_mb_per_min: raw_fluids,
         estimated_cost,
         total_machines,
+        total_machines_int,
         net_eu_t: consume_eu_t - generate_eu_t,
         consume_eu_t,
         generate_eu_t,
         net_eu_per_min,
+        objective_score: an.cost.weights.material * estimated_cost
+            + an.cost.weights.eu * net_eu_per_min
+            + an.cost.weights.machine * total_machines,
     };
 
     Plan {

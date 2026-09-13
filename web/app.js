@@ -221,9 +221,11 @@ function renderPlan(p) {
     ["原料物品 /min", fmt(p.totals.raw_items_per_min)],
     ["原料流体 mB/min", fmt(p.totals.raw_fluids_mb_per_min)],
     ["机器总数", p.totals.total_machines ? fmt(p.totals.total_machines, 1) : "-"],
+    ["整数机器数", p.totals.total_machines_int ? String(p.totals.total_machines_int) : "-"],
     ["净功率 EU/t", p.totals.total_machines ? fmt(p.totals.net_eu_t, 0) : "-"],
     ["耗电 EU/t", p.totals.total_machines ? fmt(p.totals.consume_eu_t, 0) : "-"],
     ["发电 EU/t", p.totals.total_machines ? fmt(p.totals.generate_eu_t, 0) : "-"],
+    ["目标分", fmt(p.totals.objective_score, 2)],
     ["耗时 ms", fmt(p.elapsed_ms, 1)],
   ].map(([k, v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
 
@@ -232,7 +234,7 @@ function renderPlan(p) {
       <td class="mono">${fmt(r.ops_per_min)}</td>
       <td>${esc(r.category_title)}</td>
       <td class="mono">${esc(r.recipe)}</td>
-      <td class="mono">${r.machine_count != null ? fmt(r.machine_count, 2) : "-"}</td>
+      <td class="mono">${r.machine_count != null ? (r.machine_count_int != null ? `${fmt(r.machine_count, 2)} (${r.machine_count_int})` : fmt(r.machine_count, 2)) : "-"}</td>
       <td class="mono">${r.eut != null ? fmt(r.eut, 0) : "-"}</td>
       <td>${r.tier ? `<span class="tag">${esc(r.tier)}</span>` : "-"}</td>
       <td>${r.inputs.map(planEntryHtml).join("<br>")}</td>
@@ -280,7 +282,13 @@ async function runPlan() {
     const p = await api("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ material, rate, mode, max_tier: $("#plan-tier").value || null }),
+      body: JSON.stringify({
+        material,
+        rate,
+        mode,
+        max_tier: $("#plan-tier").value || null,
+        objective: $("#plan-objective").value || null,
+      }),
     });
     lastPlan = p;
     box.innerHTML = renderPlan(p);

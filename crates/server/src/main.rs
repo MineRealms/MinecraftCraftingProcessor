@@ -578,6 +578,8 @@ struct PlanReq {
     block_amplification: Option<bool>,
     /// 最大电压等级（LV/MV/… 或数字）
     max_tier: Option<String>,
+    /// 多目标预设：balanced / economy / power / speed
+    objective: Option<String>,
 }
 
 async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
@@ -591,7 +593,6 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
     let state = Arc::clone(&st);
     let plan = tokio::task::spawn_blocking(move || {
         let g = &state.graph;
-        let an = &state.analysis;
         let m = resolve_material(g, &req.material, req.kind.as_deref().and_then(kind_from_str), req.nbt.as_deref())?;
         let max_tier = req.max_tier.as_deref().and_then(|s| {
             s.trim()
@@ -599,6 +600,18 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                 .ok()
                 .or_else(|| gt_planner_core::util::tier_index_from_name(s))
         });
+        // 多目标权重：非 balanced 时重建 Search IR（成本向量随权重变化）
+        let weights = match req.objective.as_deref() {
+            None => None,
+            Some(name) => Some(gt_planner_core::CostWeights::preset(name).ok_or_else(|| {
+                ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("未知 objective \"{name}\"（balanced/economy/power/speed）"),
+                )
+            })?),
+        };
+        let custom_an = weights.map(|w| Analysis::build_with(g, 48, w));
+        let an: &Analysis = custom_an.as_ref().unwrap_or(&state.analysis);
         let plan = match mode.as_str() {
             "beam" => {
                 let opts = BeamOptions {

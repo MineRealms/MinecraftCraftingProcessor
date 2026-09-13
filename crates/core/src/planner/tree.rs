@@ -186,8 +186,8 @@ pub(crate) fn expand_tree(
             continue;
         }
 
-        // 原料（无生产者）：直接记账
-        if g.is_raw(m) {
+        // 源材料（无可规划生产者）：直接记账
+        if g.is_source(m) {
             raw[m as usize] += qty;
             continue;
         }

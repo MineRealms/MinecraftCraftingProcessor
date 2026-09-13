@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M7 GT 数据 + 中英文 + tier 过滤`
-- 编译状态：✅ `cargo build --workspace` + `cargo test`（13 个单测全过）
-- 真实数据验证：✅ 57MB JSON 解析 ~1.5s（含 12,953 条名称）；分析 ~0.3s
-- QP 60/min：tree 66.1（279 台机器 / 净 -703 EU/t 发电）→ beam(GPU) 29.3 → exact LP 目标值 38.99
+- 最新提交：`M8 过程优化升级：CostVector + 凝聚图 + LP 内 OR 决策`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（14 个单测全过）
+- 真实数据验证：✅ 57MB JSON 解析 ~1.5s；分析 ~0.3s；tree ~1ms；beam(GPU) ~1.4s；exact ~0.7–2.5s
+- QP 60/min：tree 66.1（279 台）→ beam(GPU) 29.3 → exact 64.3（130 配方，2.5s，Optimal，原料=真实矿石）
 
 ## 里程碑看板
 
@@ -72,6 +72,21 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M8 过程优化升级（响应外部评审的 P0/P1） ✅
+- [x] **P0 CostVector**：成本从标量升级为 `{material, eu, machine}` 三维向量；
+      路线选择用加权综合分，权重预设 `balanced/economy/power/speed`（CLI `--objective` / API / 前端下拉）
+- [x] **P0 EU 进入第一层模型**：EU 与机器时间计入成本库与 LP 目标函数；
+      `gtp pareto` 输出省料/省电/省机时三方案对比
+- [x] **P0 凝聚图一级公民**：`algo/condensation.rs`（SCC → 超节点 DAG：材料/配方分组、拓扑序、上下游）
+- [x] **P0 OR 槽延迟决策**：LP 内为多候选槽建"填充变量"`Σ f_i = ops_r`，由优化器联合选择（不再贪心）
+- [x] **P1 MILP-lite**：机器数 = ceil(ops×duration/1200)，Plan/前端同时展示小数与整数台数
+- [x] **P1 成本分解**：计划输出 目标分 = w_m·原料 + w_eu·EU/min + w_machine·机器数
+- [x] **P1 子图构建重写（关键 bug 修复）**：
+      1) `is_source`：producers 非空但全是标签页/信息页的矿石此前被误判为"中间产物"（进口价 ×1000），修复后整条链可自产；
+      2) best-first 按 **(深度, 成本)** 排序 + 每材料全量生产者（上限 32）：纯按成本会陷入"微型粉↔小堆粉"封闭家族，永远够不到矿石链；
+      3) 中间产物"进口"惩罚（原料 1.0 / 中间产物 1000×）：LP 被迫从原料自产全链。
+- [x] 实测：钛粉 exact 从"直接进口"变为 38 配方自产；QP exact 130 配方 / 64.3 原料/min，原料全部为真实矿石
 
 ### M7 GT 数据 + 中英文 + tier 过滤 ✅（2026-09-13 追加）
 - [x] 解析 `gt` 需求块：duration / eut / amperage / energy_io / tier / tier_index / total_eu

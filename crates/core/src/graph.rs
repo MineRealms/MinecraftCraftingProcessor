@@ -107,6 +107,16 @@ impl KnowledgeGraph {
         self.producers[id as usize].is_empty()
     }
 
+    /// 是否为"源材料"：没有**可规划**的生产者（挖矿/采集/标签页噪音）。
+    /// 注意：某些矿石的 producers 非空但全是标签页/信息页（不可规划），
+    /// 它们仍然是源材料，必须按原料定价（否则 LP/成本库会把整条链算成不可达）。
+    pub fn is_source(&self, id: MaterialId) -> bool {
+        self.harvestable[id as usize]
+            || !self.producers[id as usize]
+                .iter()
+                .any(|&r| self.is_plannable(r))
+    }
+
     /// 配方是否可参与规划。
     pub fn is_plannable(&self, id: RecipeId) -> bool {
         self.plannable[id as usize]

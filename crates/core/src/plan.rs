@@ -31,6 +31,9 @@ pub struct PlannedRecipe {
     /// 机器数量 = ops/min × duration_ticks / 1200（需 GT 时长数据）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_count: Option<f64>,
+    /// MILP-lite：整数机器数（向上取整）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_count_int: Option<u64>,
     /// 单机功率 EU/t（eut × amperage；发电配方为发电功率）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eut: Option<f64>,
@@ -64,6 +67,8 @@ pub struct PlanTotals {
     pub estimated_cost: f64,
     /// 机器总数（Σ machine_count，含所有步骤）。
     pub total_machines: f64,
+    /// MILP-lite：整数机器总数（Σ ceil）。
+    pub total_machines_int: u64,
     /// 净功率 EU/t（耗电 − 发电）。
     pub net_eu_t: f64,
     /// 总耗电 EU/t（不含发电）。
@@ -72,4 +77,6 @@ pub struct PlanTotals {
     pub generate_eu_t: f64,
     /// 每分钟净能量（EU/min，耗电 − 发电）。
     pub net_eu_per_min: f64,
+    /// 加权目标分：w_m·原料 + w_eu·EU/min + w_machine·机器数。
+    pub objective_score: f64,
 }

@@ -70,9 +70,25 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         limit: usize,
     },
-    /// 生产计划：每分钟造 N 个目标产物
-    Plan {
+    /// 多目标对比：同一目标用 economy/power/speed 预设各规划一次并对比
+    Pareto {
         /// 材料 id
+        material: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        nbt: Option<String>,
+        /// 目标速率
+        #[arg(long, default_value_t = 60.0)]
+        rate: f64,
+        /// 规划器：tree（快）/ exact（LP）
+        #[arg(long, default_value = "tree")]
+        mode: String,
+        #[arg(long)]
+        max_tier: Option<String>,
+    },
+    /// 生产计划：每分钟造 N 个目标产物
+    Plan {        /// 材料 id
         material: String,
         #[arg(long)]
         kind: Option<String>,
@@ -108,6 +124,9 @@ enum Command {
         /// 最大电压等级（等级名 LV/MV/HV/EV/IV/LuV/ZPM/UV/UHV… 或数字）
         #[arg(long)]
         max_tier: Option<String>,
+        /// 多目标预设：balanced / economy（省料）/ power（省电）/ speed（省时间）
+        #[arg(long)]
+        objective: Option<String>,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -204,10 +223,13 @@ fn load(data: &PathBuf, names: Option<&PathBuf>) -> Result<KnowledgeGraph, Box<d
     Ok(g)
 }
 
-fn build_analysis(g: &KnowledgeGraph) -> Analysis {
-    eprintln!("构建 Search IR（SCC / 成本 / 剪枝）...");
+fn build_analysis(g: &KnowledgeGraph, weights: gt_planner_core::CostWeights) -> Analysis {
+    eprintln!(
+        "构建 Search IR（SCC / 凝聚图 / CostVector / 剪枝；权重 m={} eu={} machine={}）...",
+        weights.material, weights.eu, weights.machine
+    );
     let t0 = Instant::now();
-    let an = Analysis::build(g);
+    let an = Analysis::build_with(g, 48, weights);
     eprintln!(
         "分析完成：{} 轮迭代，收敛={}，用时 {:.2}s",
         an.cost.iterations,
@@ -215,6 +237,17 @@ fn build_analysis(g: &KnowledgeGraph) -> Analysis {
         t0.elapsed().as_secs_f64()
     );
     an
+}
+
+/// 解析 --objective 预设。
+fn parse_objective(s: Option<&str>) -> gt_planner_core::CostWeights {
+    match s {
+        Some(name) => gt_planner_core::CostWeights::preset(name).unwrap_or_else(|| {
+            eprintln!("警告：未知 --objective \"{}\"（balanced/economy/power/speed），使用 balanced", name);
+            gt_planner_core::CostWeights::default()
+        }),
+        None => gt_planner_core::CostWeights::default(),
+    }
 }
 
 /// 解析材料：精确匹配（kind 缺省时先 item 后 fluid），失败给出搜索建议。
@@ -612,14 +645,22 @@ fn cmd_plan(
     );
     if plan.totals.total_machines > 0.0 {
         println!(
-            "机器总数    {:.1} 台 | 耗电 {}/t | 发电 {}/t | 净功率 {}/t | 净能量 {}/min",
+            "机器总数    {:.1} 台（整数 {}）| 耗电 {}/t | 发电 {}/t | 净功率 {}/t | 净能量 {}/min",
             plan.totals.total_machines,
+            plan.totals.total_machines_int,
             fmt_rate(plan.totals.consume_eu_t),
             fmt_rate(plan.totals.generate_eu_t),
             fmt_rate(plan.totals.net_eu_t),
             fmt_rate(plan.totals.net_eu_per_min)
         );
     }
+    println!(
+        "目标分      {:.2}（物料×{:.2} + EU×{:e} + 机器×{:.2}）",
+        plan.totals.objective_score,
+        an.cost.weights.material,
+        an.cost.weights.eu,
+        an.cost.weights.machine
+    );
     if plan.totals.raw_fluids_mb_per_min > 0.0 {
         println!(
             "原料汇总    物品 {}/min + 流体 {}/min(mB)",
@@ -631,11 +672,11 @@ fn cmd_plan(
     println!();
     println!("-- 配方步骤（按操作量降序）--");
     for p in &plan.recipes {
-        let extra = match (p.machine_count, p.eut, p.tier.as_deref()) {
-            (Some(mc), Some(eu), Some(t)) => {
-                format!("  |  {:.2} 台  {:.0} EU/t  [{}]", mc, eu, t)
+        let extra = match (p.machine_count, p.machine_count_int, p.eut, p.tier.as_deref()) {
+            (Some(mc), Some(mi), Some(eu), Some(t)) => {
+                format!("  |  {:.2} 台({})  {:.0} EU/t  [{}]", mc, mi, eu, t)
             }
-            (Some(mc), _, _) => format!("  |  {:.2} 台", mc),
+            (Some(mc), _, _, _) => format!("  |  {:.2} 台", mc),
             _ => String::new(),
         };
         println!(
@@ -733,7 +774,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 kind.as_deref().and_then(kind_from_str),
                 nbt.as_deref(),
             )?;
-            let an = build_analysis(&g);
+            let an = build_analysis(&g, gt_planner_core::CostWeights::default());
             cmd_info(&g, &an, m, *limit);
         }
         Command::Recipes {
@@ -751,6 +792,65 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )?;
             cmd_recipes(&g, m, *limit);
         }
+        Command::Pareto {
+            material,
+            kind,
+            nbt,
+            rate,
+            mode,
+            max_tier,
+        } => {
+            let g = load(&data, names.as_ref())?;
+            let m = resolve_material(
+                &g,
+                material,
+                kind.as_deref().and_then(kind_from_str),
+                nbt.as_deref(),
+            )?;
+            let mt = max_tier.as_deref().and_then(parse_max_tier);
+            println!(
+                "== 多目标对比：{} × {}/min（mode={}）==",
+                g.material_dto(m).display_zh,
+                fmt_rate(*rate),
+                mode
+            );
+            println!(
+                "{:<10} {:>12} {:>16} {:>10} {:>12} {:>8}",
+                "预设", "原料/min", "净EU/min", "机器数", "目标分", "耗时ms"
+            );
+            for name in ["economy", "power", "speed"] {
+                let weights = gt_planner_core::CostWeights::preset(name).unwrap();
+                let an = build_analysis(&g, weights);
+                let plan = match mode.as_str() {
+                    "exact" => {
+                        let opts = gt_planner_core::solver::ExactOptions {
+                            max_tier: mt,
+                            ..Default::default()
+                        };
+                        gt_planner_core::solver::plan_exact(&g, &an, m, *rate, &opts)
+                            .map_err(|e| format!("exact 求解失败: {e}"))?
+                    }
+                    _ => {
+                        let req = PlanRequest {
+                            target: m,
+                            rate_per_min: *rate,
+                            max_ops: 200_000,
+                            max_tier: mt,
+                        };
+                        plan_tree(&g, &an, &req)
+                    }
+                };
+                println!(
+                    "{:<10} {:>12.2} {:>16.0} {:>10.1} {:>12.2} {:>8.0}",
+                    name,
+                    plan.totals.estimated_cost,
+                    plan.totals.net_eu_per_min,
+                    plan.totals.total_machines,
+                    plan.totals.objective_score,
+                    plan.elapsed_ms
+                );
+            }
+        }
         Command::Plan {
             material,
             kind,
@@ -765,6 +865,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             block_amplification,
             no_gpu,
             max_tier,
+            objective,
             verbose,
             json,
         } => {
@@ -775,7 +876,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 kind.as_deref().and_then(kind_from_str),
                 nbt.as_deref(),
             )?;
-            let an = build_analysis(&g);
+            let weights = parse_objective(objective.as_deref());
+            let an = build_analysis(&g, weights);
             let mt = max_tier.as_deref().and_then(parse_max_tier);
             if max_tier.is_some() && mt.is_none() {
                 eprintln!("警告：无法识别的 --max-tier（等级名或数字），忽略");

@@ -20,6 +20,7 @@ pub mod solver;
 pub mod util;
 
 pub use analysis::Analysis;
+pub use algo::{Condensation, CostVector, CostWeights};
 pub use error::{Error, Result};
 pub use graph::{DatasetMeta, GraphStats, KnowledgeGraph};
 pub use model::{
