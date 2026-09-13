@@ -5,9 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M9 P2 收官：Process IR / 概率覆盖 / MCTS / GPU 线性求解`
-- 编译状态：✅ `cargo build --workspace` + `cargo test`（14 个单测全过）
-- 规划模式：tree（1ms）/ beam+GPU（1.4s）/ **mcts**（400 次模拟 ~100ms）/ exact（0.7–2.5s）
+- 最新提交：`M10 GPU 矩阵求解器升级（BiCGSTAB）`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 14 + gpu 3 个单测全过）
+- 规划模式：tree / beam（GPU BiCGSTAB 粗筛 + CPU 局部搜索）/ mcts / exact
+- 同口径对比（balanced 权重，QP 60/min）：beam(GPU) 成本 46.6 vs beam(CPU) 97.8；mcts 69.6（200 次模拟）
 
 ## 里程碑看板
 
@@ -71,6 +72,18 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M10 GPU 矩阵求解器升级：BiCGSTAB ✅
+- [x] `gpu/linear.rs` 重写：**BiCGSTAB**（双共轭梯度稳定化，处理非对称 A）替代朴素定点迭代；
+      每候选一个 workgroup（256 线程），迭代内 SpMV + 归约点积；breakdown 保护
+- [x] **真实残差校验**：循环结束后重算 ‖rhs − A·x‖ 再判定收敛
+      （BiCGSTAB 可能"假收敛"：中间步 ‖s‖ 恰好很小但并非解，发散系统尤甚）
+- [x] beam 评估器（`eval.rs`）改为直接构建 CSR 系统 + BiCGSTAB 批量求解 + CPU 评分；
+      未收敛解做钳制（1e6）+ 温和罚分（1e3），保留排序信息
+- [x] `gtp flow` 输出 收敛/迭代/GPU残差/CPU残差；未收敛时给出"放大环"提示
+- [x] 单测：CSR 构建 / spmv / consumed 反推 / CPU Jacobi 收敛（3 个）
+- [x] 实测：QP 固定贪心分配含回收放大环 → 正确报告"未收敛（残差 90）"而非假收敛；
+      beam(GPU) 46.6 vs beam(CPU) 97.8（同口径）
 
 ### M9 P2 收官（评审剩余项） ✅
 - [x] **Process IR**（`process.rs`）：物料流图——步骤节点（ops/机器/等级/EU）+ 流边（速率）+

@@ -105,7 +105,10 @@ enum Command {
         /// 迭代次数
         #[arg(long, default_value_t = 200)]
         iterations: u32,
-        /// 松弛因子 ω（1.0 = 标准 Jacobi，<1 抑制发散）
+        /// 收敛容差（残差范数）
+        #[arg(long, default_value_t = 1e-5)]
+        tol: f32,
+        /// 松弛因子 ω（仅 CPU 回退的 Jacobi 使用；1.0 = 标准 Jacobi）
         #[arg(long, default_value_t = 1.0)]
         omega: f32,
         /// 展示前 N 行（按操作量降序）
@@ -999,6 +1002,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             rate,
             iterations,
+            tol,
             omega,
             top,
             max_tier,
@@ -1030,34 +1034,57 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("无法构建候选表（子图不完整）")?;
             let sys = gt_planner_gpu::FlowSystem::from_candidate(&sg, &cand, &demand);
 
-            println!("== GPU 线性求解（物料平衡 A·x = rhs）==");
+            println!("== GPU 线性求解（BiCGSTAB：物料平衡 A·x = rhs）==");
             println!(
-                "材料 {} / 配方 {} / nnz {} / 迭代 {} / ω={}",
+                "材料 {} / 配方 {} / nnz {} / 迭代上限 {} / tol {}",
                 sg.materials.len(),
                 sg.recipes.len(),
                 sys.col_idx.len(),
                 iterations,
-                omega
+                tol
             );
 
             let t0 = Instant::now();
-            let x = if *no_gpu {
-                sys.solve_cpu(*iterations, *omega)
+            let res: gt_planner_gpu::SolveResult = if *no_gpu {
+                let x = sys.solve_cpu(*iterations, *omega);
+                let residual = sys.residual(&x);
+                gt_planner_gpu::SolveResult {
+                    x,
+                    iterations: *iterations,
+                    residual,
+                    converged: residual <= *tol,
+                }
             } else {
                 match gt_planner_gpu::GpuFlowSolver::new() {
                     Ok(solver) => {
-                        eprintln!("GPU 求解器就绪");
+                        eprintln!("GPU 求解器就绪: {}", solver.adapter_name);
                         solver
-                            .solve_batch(std::slice::from_ref(&sys), *iterations, *omega)
+                            .solve_batch(std::slice::from_ref(&sys), *iterations, *tol)
                             .remove(0)
                     }
                     Err(e) => {
                         eprintln!("{}；CPU 回退", e);
-                        sys.solve_cpu(*iterations, *omega)
+                        let x = sys.solve_cpu(*iterations, *omega);
+                        let residual = sys.residual(&x);
+                        gt_planner_gpu::SolveResult {
+                            x,
+                            iterations: *iterations,
+                            residual,
+                            converged: residual <= *tol,
+                        }
                     }
                 }
             };
             let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
+            let x = &res.x;
+            let cpu_residual = sys.residual(x);
+            println!(
+                "收敛 {} / 迭代 {} / GPU残差 {:.3e} / CPU残差 {:.3e}",
+                if res.converged { "是" } else { "否" },
+                res.iterations,
+                res.residual,
+                cpu_residual
+            );
 
             // 输出：按操作量降序
             let consumed = sys.consumed(&x);
@@ -1098,6 +1125,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "⚠ 解发散（存在材料放大环）：最大操作量 {:.3e}；建议更小 ω 或改用 exact/beam 模式",
                     max_x
+                );
+            } else if !res.converged {
+                println!(
+                    "⚠ 未收敛（残差 {:.3e}）：固定贪心分配可能包含放大环；建议改用 exact/beam 模式",
+                    cpu_residual
                 );
             }
         }

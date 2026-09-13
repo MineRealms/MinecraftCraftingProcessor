@@ -8,6 +8,6 @@ pub mod eval;
 pub mod linear;
 pub mod subgraph;
 
-pub use eval::{GpuEvaluator, GpuUnavailable};
-pub use linear::{FlowSystem, GpuFlowSolver};
+pub use eval::GpuEvaluator;
+pub use linear::{FlowSystem, GpuFlowSolver, GpuUnavailable, SolveResult};
 pub use subgraph::{build_subgraph_from_plan, CandidateTable, SubgraphData};
