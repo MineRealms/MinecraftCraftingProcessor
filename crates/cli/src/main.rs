@@ -77,7 +77,7 @@ enum Command {
         /// 目标速率（物品=个/分，流体=mB/分）
         #[arg(long, default_value_t = 60.0)]
         rate: f64,
-        /// 模式：tree（确定性展开）/ beam（Beam Search）
+        /// 模式：tree（确定性展开）/ beam（局部搜索）/ exact（LP 精确求解）
         #[arg(long, default_value = "tree")]
         mode: String,
         /// Beam 前沿宽度（保留的候选选择表数）
@@ -92,6 +92,12 @@ enum Command {
         /// 展开操作上限（tree 模式）
         #[arg(long, default_value_t = 200_000)]
         max_ops: usize,
+        /// exact 模式：允许回收类配方（默认关闭，纯物料模型下回收环可能刷材料）
+        #[arg(long)]
+        include_recycling: bool,
+        /// exact 模式：屏蔽"循环+材料放大"配方（保守，可能误伤正常制造）
+        #[arg(long)]
+        block_amplification: bool,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -471,6 +477,8 @@ fn cmd_plan(
     beam_width: usize,
     candidates: usize,
     max_iterations: usize,
+    include_recycling: bool,
+    block_amplification: bool,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -493,8 +501,17 @@ fn cmd_plan(
             };
             gt_planner_core::planner::plan_beam(g, an, m, rate, &opts)
         }
+        "exact" => {
+            let opts = gt_planner_core::solver::ExactOptions {
+                include_recycling,
+                block_amplification,
+                ..Default::default()
+            };
+            gt_planner_core::solver::plan_exact(g, an, m, rate, &opts)
+                .map_err(|e| format!("exact 求解失败: {e}"))?
+        }
         other => {
-            return Err(format!("不支持的模式 \"{}\"（tree / beam）", other).into());
+            return Err(format!("不支持的模式 \"{}\"（tree / beam / exact）", other).into());
         }
     };
 
@@ -643,6 +660,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             candidates,
             max_iterations,
             max_ops,
+            include_recycling,
+            block_amplification,
             verbose,
             json,
         } => {
@@ -664,6 +683,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 *beam_width,
                 *candidates,
                 *max_iterations,
+                *include_recycling,
+                *block_amplification,
                 *verbose,
                 json.as_ref(),
             )?;

@@ -84,6 +84,18 @@ cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 - [ ] Pareto 前沿输出
 - [ ] （可选）MILP / CP-SAT 精确求解
 
+### M6a LP 精确求解 ✅（2026-09-13 追加）
+- [x] `solver/mod.rs`：物料平衡 LP（good_lp + microlp 纯 Rust 后端）
+- [x] 变量：配方操作量 + 每种材料的外部输入；目标：外部输入按成本库价格计费 + ε·操作量
+- [x] 子图构建（目标上游 BFS，可配置上限），循环由 LP 自动处理
+- [x] 默认排除回收类配方；可选 `--block-amplification` 保守模式
+- [x] 方案含循环配方时明确警告（物料模型无耗电，可能利用放大环）
+- [x] CLI `--mode exact` / API `mode: "exact"` / 前端模式选择
+- [x] 实测：QP 60/min 目标值 38.99（Optimal，654ms）；铜 3.33 原料/min
+
+**模型边界（重要）**：LP 是"纯物料平衡"模型的精确解；由于没有 EU/时长数据，
+它可能利用游戏里靠耗电阻止的材料放大环。要"保守但非最优"的方案用 beam 模式。
+
 ## 开发日志
 
 ### 2026-09-13 · M0

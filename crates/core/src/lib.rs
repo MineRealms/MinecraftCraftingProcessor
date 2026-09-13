@@ -15,6 +15,7 @@ pub mod parser;
 pub mod plan;
 pub mod planner;
 pub mod raw;
+pub mod solver;
 pub mod util;
 
 pub use analysis::Analysis;
@@ -26,5 +27,6 @@ pub use model::{
 };
 pub use plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
 pub use planner::{plan_beam, plan_tree, BeamOptions, PlanRequest};
+pub use solver::{plan_exact, ExactOptions};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

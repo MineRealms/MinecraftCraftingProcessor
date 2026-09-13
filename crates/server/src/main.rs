@@ -562,6 +562,8 @@ struct PlanReq {
     beam_width: Option<usize>,
     candidates: Option<usize>,
     max_iterations: Option<usize>,
+    include_recycling: Option<bool>,
+    block_amplification: Option<bool>,
 }
 
 async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
@@ -587,6 +589,15 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                     ops_penalty: 0.001,
                 };
                 plan_beam(g, an, m, req.rate, &opts)
+            }
+            "exact" => {
+                let opts = gt_planner_core::solver::ExactOptions {
+                    include_recycling: req.include_recycling.unwrap_or(false),
+                    block_amplification: req.block_amplification.unwrap_or(false),
+                    ..Default::default()
+                };
+                gt_planner_core::solver::plan_exact(g, an, m, req.rate, &opts)
+                    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?
             }
             _ => {
                 let preq = PlanRequest {
