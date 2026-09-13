@@ -76,11 +76,11 @@ cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 ## 开发阶段
 
 - [x] Phase 0 项目骨架 + 文档
-- [ ] Phase 1 解析器 + Knowledge Graph + CLI stats（进行中）
-- [ ] Phase 2 SCC / 剪枝 / 启发式 + 确定性展开
-- [ ] Phase 3 Beam Search 规划器 + Plan IR
-- [ ] Phase 4 Web API + 前端可视化
+- [x] Phase 1 解析器 + Knowledge Graph + CLI stats（126MB JSON ~1.6s）
+- [x] Phase 2 SCC / 剪枝 / 启发式 + 确定性展开
+- [x] Phase 3 Beam Search 规划器 + Plan IR（QP 60/min：成本 66.1 → 30.6）
+- [x] Phase 4 Web API + 前端可视化（axum + cytoscape）
 - [ ] Phase 5 GPU 加速（wgpu）：候选评估 / GPU Top-K
 - [ ] Phase 6 高级：MILP / CP-SAT / Pareto 多目标
 
-详见 `docs/PLAN.md` 与 `docs/PROGRESS.md`。
+详见 `docs/PLAN.md` 与 `docs/PROGRESS.md`（含数据踩坑记录）。
