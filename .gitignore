@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+Thumbs.db
+
+# 本地数据与生成物
+/data
+*.aup3
+*.tmp
+jei_recipes.json
+recipe_times.json
