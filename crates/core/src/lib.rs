@@ -25,6 +25,6 @@ pub use model::{
     RecipeNode, Slot, SlotDto,
 };
 pub use plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
-pub use planner::{plan_tree, PlanRequest};
+pub use planner::{plan_beam, plan_tree, BeamOptions, PlanRequest};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

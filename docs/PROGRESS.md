@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M2 图算法 + 确定性规划器`
+- 最新提交：`M3 Beam Search + Plan IR`
 - 编译状态：✅ `cargo build --workspace` + `cargo test`（13 个单测全过）
-- 真实数据验证：✅ 126MB JSON 解析 ~1.6s（release）；分析（SCC+成本+剪枝）~0.2s；
-  铜锭/量子处理器计划跑通，无 NaN/inf；峰值内存 ~302MB
+- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.25s；tree 规划 ~1ms；beam ~1.1s
+- 量子处理器 60/min：tree 成本 66.1 → beam 30.6（beam 以 tree 为基线做配方分配局部搜索）
 
 ## 里程碑看板
 
@@ -49,12 +49,16 @@
 
 **已知局限**：无配方时长/EU 数据 → 机器数量与电耗未计算；同成本路线的经济性判断仅靠启发式。
 
-### M3 Beam Search + Plan IR ⬜
-- [ ] `plan.rs`：Plan IR 序列化
-- [ ] `planner/beam.rs`：状态展开 / f=g+h / 去重 / Top-K
-- [ ] CLI `gtp plan --mode beam`
-- [ ] tree vs beam 对照测试
-- [ ] 提交 + 编译验证
+### M3 Beam Search + Plan IR ✅
+- [x] `plan.rs`：Plan IR 序列化（配方步骤 / 原料 / 副产物 / 汇总 / 备注）
+- [x] `planner/mod.rs`：tree/beam 共享 Plan 组装
+- [x] `planner/beam.rs`：**配方分配局部搜索式 Beam**（以贪心解为基线，扰动配方选择，完整展开评估，保留 top-K）
+- [x] CLI `gtp plan --mode beam`（`--beam-width/--candidates/--max-iterations`）
+- [x] 真实数据对照：QP 60/min，tree 66.1 → beam 30.6 原始物品当量（3712 次候选评估，1.1s）
+
+**设计说明**：最初实现了"逐步需求展开"式 beam，实测在循环数据上退化（永动机解、前沿耗尽）。
+改为"配方分配 + 完整展开评估"式局部搜索：任何时刻都有完整方案、保证不劣于 tree、
+天然可 GPU 并行（批量评估候选选择表）。
 
 ### M4 Web API + 前端 ⬜
 - [ ] axum 路由（stats / search / material / recipe / graph / plan）

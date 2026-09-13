@@ -1,18 +1,21 @@
 //! 确定性展开（tree mode）：工作队列 + 环内线性缩放。
 //!
 //! 算法：
-//! 1. 需求队列按材料展开，每种材料用启发式最优配方；
+//! 1. 需求队列按材料展开，每种材料用启发式最优配方（可被 overrides 覆盖）；
 //! 2. 环内材料复用已选配方，按需求量线性放大（迭代收敛）；
 //! 3. 其他输出按"抵原料 → 抵需求 → 记副产物"顺序处理；
 //! 4. 输入槽取单位成本最便宜的候选。
+//!
+//! `expand_tree` 是纯展开内核，供 tree / beam 共用：
+//! beam 以贪心选择为基线，扰动"某材料换配方"后用完整展开评估。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
-use crate::model::{MaterialId, MaterialKind, RecipeId};
-use crate::plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
+use crate::model::{MaterialId, RecipeId};
+use crate::plan::Plan;
 use crate::util::{cheapest_alt, mat_norm_qty, output_qty_of};
 
 const EPS: f64 = 1e-9;
@@ -37,6 +40,20 @@ impl PlanRequest {
     }
 }
 
+/// 展开结果（未组装 Plan）。
+pub(crate) struct TreeResult {
+    pub ops: Vec<(RecipeId, f64)>,
+    pub raw: Vec<(MaterialId, f64)>,
+    pub byproducts: Vec<(MaterialId, f64)>,
+    /// 实际使用的配方选择（材料 → 配方）。
+    pub choices: HashMap<MaterialId, RecipeId>,
+    pub notes: Vec<String>,
+    /// 估算成本（原始物品当量）。
+    pub estimated_cost: f64,
+    /// 总操作量。
+    pub ops_total: f64,
+}
+
 fn add_demand(
     m: MaterialId,
     qty: f64,
@@ -54,14 +71,6 @@ fn add_demand(
     }
 }
 
-/// 速率归一（流体 mB → 桶）。
-fn norm_rate(kind: MaterialKind, rate: f64) -> f64 {
-    match kind {
-        MaterialKind::Fluid => rate / 1000.0,
-        _ => rate,
-    }
-}
-
 /// 记录备注（去重）。
 fn note(notes: &mut Vec<String>, msg: String) {
     if !notes.contains(&msg) {
@@ -69,9 +78,13 @@ fn note(notes: &mut Vec<String>, msg: String) {
     }
 }
 
-/// 确定性展开规划。
-pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
-    let t0 = Instant::now();
+/// 确定性展开内核。`overrides` 指定材料的配方选择（未指定则用启发式最优）。
+pub(crate) fn expand_tree(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    req: &PlanRequest,
+    overrides: &HashMap<MaterialId, RecipeId>,
+) -> TreeResult {
     let n = g.materials.len();
     let mut notes: Vec<String> = Vec::new();
 
@@ -79,12 +92,17 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
     let mut raw: Vec<f64> = vec![0.0; n];
     let mut byproduct: Vec<f64> = vec![0.0; n];
     let mut chosen: Vec<Option<RecipeId>> = vec![None; n];
+    for (&m, &r) in overrides {
+        chosen[m as usize] = Some(r);
+    }
     let mut ops: Vec<f64> = vec![0.0; g.recipes.len()];
     let mut queued = vec![false; n];
     let mut queue: VecDeque<MaterialId> = VecDeque::new();
     // 每材料展开次数（循环保险：超限按外部输入处理）
     let mut visits: Vec<u16> = vec![0; n];
     let mut visit_limit_hit = false;
+    // 无可达生产路线的材料（聚合为一条备注）
+    let mut no_route: Vec<MaterialId> = Vec::new();
 
     let mut expansions = 0usize;
     let mut truncated = false;
@@ -107,11 +125,14 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
         // 发散保护：需求失控时中止
         if !qty.is_finite() || qty > 1e15 {
             truncated = true;
-            note(&mut notes, format!(
-                "需求发散（{} 达到 {:e}），已中止展开",
-                g.material_id_str(m),
-                qty
-            ));
+            note(
+                &mut notes,
+                format!(
+                    "需求发散（{} 达到 {:e}），已中止展开",
+                    g.material_id_str(m),
+                    qty
+                ),
+            );
             break;
         }
         // 循环保险：同一材料展开次数超限后按外部输入处理
@@ -139,10 +160,7 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
                 }
                 None => {
                     if !g.harvestable[m as usize] {
-                        note(&mut notes, format!(
-                            "{} 无可达生产路线，按外部输入处理",
-                            g.material_id_str(m)
-                        ));
+                        no_route.push(m);
                     }
                     raw[m as usize] += qty;
                     continue;
@@ -151,10 +169,13 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
         };
         let recipe = g.recipe(rid);
         let Some(out_q) = output_qty_of(recipe, m) else {
-            note(&mut notes, format!(
-                "配方 {} 不产出目标材料，已按原料处理",
-                g.recipe_full_id(rid)
-            ));
+            note(
+                &mut notes,
+                format!(
+                    "配方 {} 不产出目标材料，已按原料处理",
+                    g.recipe_full_id(rid)
+                ),
+            );
             raw[m as usize] += qty;
             continue;
         };
@@ -162,7 +183,10 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
         expansions += 1;
         if expansions > req.max_ops {
             truncated = true;
-            note(&mut notes, format!("展开次数达到上限 {}，计划可能不完整", req.max_ops));
+            note(
+                &mut notes,
+                format!("展开次数达到上限 {}，计划可能不完整", req.max_ops),
+            );
             break;
         }
 
@@ -207,118 +231,106 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
         }
     }
 
-    if visit_limit_hit {
-        note(&mut notes, "部分材料循环展开次数超限，已按外部输入处理".to_string());
+    if !no_route.is_empty() {
+        let mut names: Vec<String> = no_route
+            .iter()
+            .map(|&m| g.material_id_str(m).to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        let shown: Vec<String> = names.iter().take(5).cloned().collect();
+        note(
+            &mut notes,
+            format!(
+                "{} 种材料无可达生产路线，按外部输入处理（前 5：{}{}）",
+                names.len(),
+                shown.join(", "),
+                if names.len() > 5 { " …" } else { "" }
+            ),
+        );
     }
-
+    if visit_limit_hit {
+        note(
+            &mut notes,
+            "部分材料循环展开次数超限，已按外部输入处理".to_string(),
+        );
+    }
     if !an.cost.converged {
-        note(&mut notes, "成本迭代未完全收敛（存在复杂循环），估算值可能偏差".to_string());
+        note(
+            &mut notes,
+            "成本迭代未完全收敛（存在复杂循环），估算值可能偏差".to_string(),
+        );
     }
     if truncated {
-        note(&mut notes, "结果不完整：存在未满足需求或循环放大".to_string());
+        note(
+            &mut notes,
+            "结果不完整：存在未满足需求或循环放大".to_string(),
+        );
     }
-    note(&mut notes, "JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
 
-    // ---------------- 组装 Plan IR ----------------
+    // ---------------- 汇总 ----------------
+    let ops_vec: Vec<(RecipeId, f64)> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, &op)| op > EPS)
+        .map(|(rid, &op)| (rid as RecipeId, op))
+        .collect();
+    let raw_vec: Vec<(MaterialId, f64)> = (0..n)
+        .filter(|&m| raw[m] > EPS)
+        .map(|m| (m as MaterialId, raw[m]))
+        .collect();
+    let byproduct_vec: Vec<(MaterialId, f64)> = (0..n)
+        .filter(|&m| byproduct[m] > EPS)
+        .map(|m| (m as MaterialId, byproduct[m]))
+        .collect();
+    let estimated_cost: f64 = raw_vec
+        .iter()
+        .map(|&(m, q)| super::norm_rate(g.material(m).key.kind, q))
+        .sum();
+    let ops_total: f64 = ops_vec.iter().map(|&(_, q)| q).sum();
+    let choices: HashMap<MaterialId, RecipeId> = chosen
+        .iter()
+        .enumerate()
+        .filter_map(|(m, r)| r.map(|r| (m as MaterialId, r)))
+        .collect();
 
-    let mut planned: Vec<PlannedRecipe> = Vec::new();
-    for (rid, &op) in ops.iter().enumerate() {
-        if op <= EPS {
-            continue;
-        }
-        let r = g.recipe(rid as RecipeId);
-        let cat = g.category(r.category);
-        let mut inputs = Vec::new();
-        for slot in &r.inputs {
-            let Some((am, aq)) = cheapest_alt(g, &an.cost.unit_cost, Some(&an.cost.cyclic), slot)
-            else {
-                continue;
-            };
-            inputs.push(PlanEntry {
-                material: g.material_dto(am),
-                rate_per_min: op * mat_norm_qty(g, am, aq),
-            });
-        }
-        let mut outputs = Vec::new();
-        for slot in &r.outputs {
-            let Some((om, oq)) = slot.primary() else {
-                continue;
-            };
-            outputs.push(PlanEntry {
-                material: g.material_dto(om),
-                rate_per_min: op * mat_norm_qty(g, om, oq),
-            });
-        }
-        planned.push(PlannedRecipe {
-            recipe: g.recipe_full_id(rid as RecipeId),
-            category: cat.ty.clone(),
-            category_title: cat.title.clone(),
-            ops_per_min: op,
-            machine_count: None,
-            inputs,
-            outputs,
-        });
-    }
-    planned.sort_by(|a, b| {
-        b.ops_per_min
-            .total_cmp(&a.ops_per_min)
-            .then_with(|| a.recipe.cmp(&b.recipe))
-    });
-
-    let mut raw_entries: Vec<PlanEntry> = Vec::new();
-    let mut byproduct_entries: Vec<PlanEntry> = Vec::new();
-    let mut estimated_cost = 0.0f64;
-    let mut raw_items = 0.0f64;
-    let mut raw_fluids = 0.0f64;
-    for m in 0..n {
-        if raw[m] > EPS {
-            let info = g.material(m as MaterialId);
-            estimated_cost += norm_rate(info.key.kind, raw[m]);
-            if info.key.kind.is_fluid() {
-                raw_fluids += raw[m];
-            } else {
-                raw_items += raw[m];
-            }
-            raw_entries.push(PlanEntry {
-                material: g.material_dto(m as MaterialId),
-                rate_per_min: raw[m],
-            });
-        }
-        if byproduct[m] > EPS {
-            byproduct_entries.push(PlanEntry {
-                material: g.material_dto(m as MaterialId),
-                rate_per_min: byproduct[m],
-            });
-        }
-    }
-    raw_entries.sort_by(|a, b| {
-        b.rate_per_min
-            .total_cmp(&a.rate_per_min)
-            .then_with(|| a.material.id.cmp(&b.material.id))
-    });
-    byproduct_entries.sort_by(|a, b| {
-        b.rate_per_min
-            .total_cmp(&a.rate_per_min)
-            .then_with(|| a.material.id.cmp(&b.material.id))
-    });
-
-    let totals = PlanTotals {
-        distinct_recipes: planned.len(),
-        recipe_ops_per_min: planned.iter().map(|p| p.ops_per_min).sum(),
-        raw_items_per_min: raw_items,
-        raw_fluids_mb_per_min: raw_fluids,
-        estimated_cost,
-    };
-
-    Plan {
-        target: g.material_dto(req.target),
-        rate_per_min: req.rate_per_min,
-        mode: "tree".to_string(),
-        recipes: planned,
-        raw_materials: raw_entries,
-        byproducts: byproduct_entries,
-        totals,
+    TreeResult {
+        ops: ops_vec,
+        raw: raw_vec,
+        byproducts: byproduct_vec,
+        choices,
         notes,
-        elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        estimated_cost,
+        ops_total,
     }
+}
+
+/// 确定性展开规划。
+pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
+    let t0 = Instant::now();
+    let mut res = expand_tree(g, an, req, &HashMap::new());
+    res.notes
+        .push("JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
+    super::assemble_plan(
+        g,
+        an,
+        req.target,
+        req.rate_per_min,
+        "tree",
+        &res.ops,
+        &res.raw,
+        &res.byproducts,
+        res.notes,
+        t0.elapsed().as_secs_f64() * 1000.0,
+    )
+}
+
+/// 带配方覆盖的展开（beam 局部搜索评估用）。
+pub(crate) fn expand_with_choices(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    req: &PlanRequest,
+    choices: &HashMap<MaterialId, RecipeId>,
+) -> TreeResult {
+    expand_tree(g, an, req, choices)
 }

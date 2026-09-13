@@ -77,10 +77,19 @@ enum Command {
         /// 目标速率（物品=个/分，流体=mB/分）
         #[arg(long, default_value_t = 60.0)]
         rate: f64,
-        /// 模式：tree（确定性展开）
+        /// 模式：tree（确定性展开）/ beam（Beam Search）
         #[arg(long, default_value = "tree")]
         mode: String,
-        /// 展开操作上限
+        /// Beam 前沿宽度（保留的候选选择表数）
+        #[arg(long, default_value_t = 8)]
+        beam_width: usize,
+        /// Beam 每材料候选替代配方数
+        #[arg(long, default_value_t = 3)]
+        candidates: usize,
+        /// Beam 局部搜索轮数
+        #[arg(long, default_value_t = 12)]
+        max_iterations: usize,
+        /// 展开操作上限（tree 模式）
         #[arg(long, default_value_t = 200_000)]
         max_ops: usize,
         /// 展开每个配方的输入输出明细
@@ -459,6 +468,9 @@ fn cmd_plan(
     rate: f64,
     mode: &str,
     max_ops: usize,
+    beam_width: usize,
+    candidates: usize,
+    max_iterations: usize,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -471,8 +483,18 @@ fn cmd_plan(
             };
             plan_tree(g, an, &req)
         }
+        "beam" => {
+            let opts = gt_planner_core::planner::BeamOptions {
+                beam_width,
+                candidate_limit: candidates,
+                max_iterations,
+                sample_per_state: 24,
+                ops_penalty: 0.001,
+            };
+            gt_planner_core::planner::plan_beam(g, an, m, rate, &opts)
+        }
         other => {
-            return Err(format!("暂不支持的模式 \"{}\"（当前支持 tree）", other).into());
+            return Err(format!("不支持的模式 \"{}\"（tree / beam）", other).into());
         }
     };
 
@@ -617,6 +639,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             rate,
             mode,
+            beam_width,
+            candidates,
+            max_iterations,
             max_ops,
             verbose,
             json,
@@ -629,7 +654,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 nbt.as_deref(),
             )?;
             let an = build_analysis(&g);
-            cmd_plan(&g, &an, m, *rate, mode, *max_ops, *verbose, json.as_ref())?;
+            cmd_plan(
+                &g,
+                &an,
+                m,
+                *rate,
+                mode,
+                *max_ops,
+                *beam_width,
+                *candidates,
+                *max_iterations,
+                *verbose,
+                json.as_ref(),
+            )?;
         }
     }
     Ok(())
