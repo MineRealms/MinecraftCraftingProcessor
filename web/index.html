@@ -52,14 +52,27 @@
     </section>
 
     <section id="tab-graph" class="tab">
-      <div class="toolbar">
+      <div class="toolbar graph-controls">
         <input id="graph-material" placeholder="材料 id">
-        <label class="slider">深度 <input id="graph-depth" type="range" min="1" max="4" value="2"></label>
-        <span id="graph-depth-val" class="unit">2</span>
         <button id="graph-btn">加载图谱</button>
-        <span class="hint">方向：材料 → 消耗它的配方 → 上游材料</span>
+        <select id="graph-direction">
+          <option value="up">上游（原料链）</option>
+          <option value="down">下游（用途）</option>
+          <option value="both">双向</option>
+        </select>
+        <label class="slider">深度 <input id="graph-depth" type="range" min="1" max="5" value="2"></label>
+        <span id="graph-depth-val" class="unit">2</span>
+        <label class="slider">节点上限 <input id="graph-maxnodes" type="range" min="50" max="1200" step="50" value="300"></label>
+        <span id="graph-maxnodes-val" class="unit">300</span>
+        <label class="slider">每配方输入 <input id="graph-maxinputs" type="range" min="1" max="20" value="6"></label>
+        <span id="graph-maxinputs-val" class="unit">6</span>
+        <label class="check"><input type="checkbox" id="graph-norecycle" checked> 隐藏回收</label>
+        <label class="check"><input type="checkbox" id="graph-onlymat"> 只显示材料</label>
+        <label class="check"><input type="checkbox" id="graph-nolabels"> 隐藏标签</label>
+        <input id="graph-filter" class="filter-input" placeholder="高亮过滤：输入 id 片段…">
       </div>
       <div id="cy"></div>
+      <div id="graph-status" class="graph-status"></div>
     </section>
   </main>
 

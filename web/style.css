@@ -154,7 +154,15 @@ h3 { font-size: 14px; margin: 16px 0 8px; color: var(--muted); font-weight: 600;
 .alt { margin-right: 10px; white-space: nowrap; }
 .or { color: var(--accent-2); font-size: 11px; }
 
-#cy { height: calc(100vh - 210px); border: 1px solid var(--border); border-radius: 10px; background: #0c0e14; }
+#cy { height: calc(100vh - 240px); border: 1px solid var(--border); border-radius: 10px; background: #0c0e14; }
+.graph-controls { gap: 6px; }
+.graph-controls input[type="range"] { min-width: 90px; width: 90px; padding: 0; }
+.graph-controls input[type="text"], .graph-controls input:not([type]) { min-width: 200px; }
+.filter-input { min-width: 180px !important; }
+label.check { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+label.check input { min-width: 0; }
+label.slider { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12.5px; }
+.graph-status { margin-top: 6px; color: var(--muted); font-size: 12px; }
 
 footer {
   display: flex;

@@ -144,25 +144,14 @@ struct GraphNodeData {
     category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     count: Option<usize>,
+    /// 材料完整 id（如 gtceu:copper_ingot），用于点击跳转
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mat_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct GraphEdge {
     data: GraphEdgeData,
-}
-
-#[derive(Serialize)]
-struct GraphEdgeData {
-    id: String,
-    source: String,
-    target: String,
-}
-
-#[derive(Serialize)]
-struct GraphView {
-    nodes: Vec<GraphNode>,
-    edges: Vec<GraphEdge>,
-    truncated: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,47 +263,176 @@ async fn api_material(
     }))
 }
 
+#[derive(Serialize)]
+struct GraphEdgeData {
+    id: String,
+    source: String,
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GraphView {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    truncated: bool,
+    /// 因每配方输入/输出上限被隐藏的边数
+    pruned_edges: usize,
+    /// 起点材料节点 id
+    start: String,
+}
+
+/// 添加材料节点（返回是否新增）。
+fn add_material_node(
+    g: &KnowledgeGraph,
+    nodes: &mut Vec<GraphNode>,
+    seen: &mut HashSet<String>,
+    m: MaterialId,
+) -> bool {
+    let mid = format!("m:{}", m);
+    if seen.insert(mid.clone()) {
+        let info = g.material(m);
+        nodes.push(GraphNode {
+            data: GraphNodeData {
+                id: mid,
+                label: info.display.clone(),
+                node_type: "material".to_string(),
+                material_kind: Some(g.kind_str(info.key.kind).to_string()),
+                category: None,
+                count: None,
+                mat_id: Some(g.material_id_str(m).to_string()),
+            },
+        });
+        true
+    } else {
+        false
+    }
+}
+
+/// 添加配方节点（返回是否新增）。
+fn add_recipe_node(
+    g: &KnowledgeGraph,
+    nodes: &mut Vec<GraphNode>,
+    seen: &mut HashSet<String>,
+    rid: RecipeId,
+) -> bool {
+    let rid_s = format!("r:{}", rid);
+    if seen.insert(rid_s.clone()) {
+        let r = g.recipe(rid);
+        let cat = g.category(r.category);
+        nodes.push(GraphNode {
+            data: GraphNodeData {
+                id: rid_s,
+                label: r.id.clone(),
+                node_type: "recipe".to_string(),
+                material_kind: None,
+                category: Some(cat.title.clone()),
+                count: Some(r.inputs.len()),
+                mat_id: None,
+            },
+        });
+        true
+    } else {
+        false
+    }
+}
+
+fn add_graph_edge(
+    edges: &mut Vec<GraphEdge>,
+    seen: &mut HashSet<(String, String)>,
+    source: String,
+    target: String,
+    label: Option<String>,
+) {
+    let key = (source.clone(), target.clone());
+    if seen.insert(key) {
+        edges.push(GraphEdge {
+            data: GraphEdgeData {
+                id: format!("e:{}>{}", source, target),
+                source,
+                target,
+                label,
+            },
+        });
+    }
+}
+
+fn qty_label(g: &KnowledgeGraph, m: MaterialId, qty: u64) -> Option<String> {
+    if qty == 0 {
+        return None;
+    }
+    match g.material(m).key.kind {
+        MaterialKind::Fluid => Some(format!("{}mB", qty)),
+        _ => Some(format!("x{}", qty)),
+    }
+}
+
+/// 按归一数量取前 N 个主候选（返回 (保留, 被裁剪数)）。
+fn top_primaries(
+    g: &KnowledgeGraph,
+    slots: &[gt_planner_core::Slot],
+    limit: usize,
+) -> (Vec<(MaterialId, u64)>, usize) {
+    let mut primaries: Vec<(MaterialId, u64)> = slots.iter().filter_map(|s| s.primary()).collect();
+    primaries.sort_by(|a, b| {
+        gt_planner_core::util::mat_norm_qty(g, b.0, b.1)
+            .total_cmp(&gt_planner_core::util::mat_norm_qty(g, a.0, a.1))
+    });
+    let pruned = primaries.len().saturating_sub(limit);
+    primaries.truncate(limit);
+    (primaries, pruned)
+}
+
 #[derive(Deserialize)]
 struct GraphParams {
     material: String,
     kind: Option<String>,
     depth: Option<usize>,
-    limit: Option<usize>,
+    /// up（上游原料）/ down（下游用途）/ both
+    direction: Option<String>,
+    max_nodes: Option<usize>,
+    /// 每个配方最多展示的输入槽数
+    max_inputs: Option<usize>,
+    /// 每个配方最多展示的输出槽数
+    max_outputs: Option<usize>,
+    /// 排除回收类配方（默认 true）
+    exclude_recycling: Option<bool>,
 }
 
 async fn api_graph(State(st): St, Query(p): Query<GraphParams>) -> Result<Json<GraphView>, ApiError> {
     let g = &st.graph;
     let start = resolve_material(g, &p.material, p.kind.as_deref().and_then(kind_from_str), None)?;
-    let depth = p.depth.unwrap_or(2).min(5);
-    let node_limit = p.limit.unwrap_or(400).min(2000);
+    let depth = p.depth.unwrap_or(2).clamp(1, 6);
+    let direction = p.direction.as_deref().unwrap_or("up");
+    let node_limit = p.max_nodes.unwrap_or(300).clamp(10, 1500);
+    let max_inputs = p.max_inputs.unwrap_or(6).clamp(1, 50);
+    let max_outputs = p.max_outputs.unwrap_or(4).clamp(1, 50);
+    let exclude_recycling = p.exclude_recycling.unwrap_or(true);
 
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
     let mut seen_nodes: HashSet<String> = HashSet::new();
-    let mut seen_edges: HashSet<String> = HashSet::new();
+    let mut seen_edges: HashSet<(String, String)> = HashSet::new();
     let mut truncated = false;
+    let mut pruned_edges = 0usize;
 
-    // BFS 上游（生产者方向）
-    let mut queue: VecDeque<(MaterialId, usize)> = VecDeque::new();
-    queue.push_back((start, 0));
-    let mut visited: HashSet<MaterialId> = HashSet::new();
-    visited.insert(start);
+    add_material_node(g, &mut nodes, &mut seen_nodes, start);
 
-    while let Some((m, d)) = queue.pop_front() {
-        let mid = format!("m:{}", m);
-        if seen_nodes.insert(mid.clone()) {
-            let info = g.material(m);
-            nodes.push(GraphNode {
-                data: GraphNodeData {
-                    id: mid.clone(),
-                    label: info.display.clone(),
-                    node_type: "material".to_string(),
-                    material_kind: Some(g.kind_str(info.key.kind).to_string()),
-                    category: None,
-                    count: None,
-                },
-            });
-        }
+    let mut queue: VecDeque<(MaterialId, usize, i8)> = VecDeque::new();
+    let mut visited: HashSet<(MaterialId, i8)> = HashSet::new();
+    let want_up = direction == "up" || direction == "both";
+    let want_down = direction == "down" || direction == "both";
+    if want_up {
+        queue.push_back((start, 0, 1));
+        visited.insert((start, 1));
+    }
+    if want_down {
+        queue.push_back((start, 0, -1));
+        visited.insert((start, -1));
+    }
+
+    'bfs: while let Some((m, d, sign)) = queue.pop_front() {
         if nodes.len() >= node_limit {
             truncated = true;
             break;
@@ -322,70 +440,104 @@ async fn api_graph(State(st): St, Query(p): Query<GraphParams>) -> Result<Json<G
         if d >= depth {
             continue;
         }
-        for &rid in &g.producers[m as usize] {
-            if !g.is_plannable(rid) {
-                continue;
-            }
-            let r = g.recipe(rid);
-            if r.inputs.is_empty() {
-                continue;
-            }
-            let rid_s = format!("r:{}", rid);
-            if seen_nodes.insert(rid_s.clone()) {
-                let cat = g.category(r.category);
-                nodes.push(GraphNode {
-                    data: GraphNodeData {
-                        id: rid_s.clone(),
-                        label: r.id.clone(),
-                        node_type: "recipe".to_string(),
-                        material_kind: None,
-                        category: Some(cat.title.clone()),
-                        count: Some(r.inputs.len()),
-                    },
-                });
-            }
-            // 材料 → 配方
-            let eid = format!("e:{}>{}", mid, rid_s);
-            if seen_edges.insert(eid.clone()) {
-                edges.push(GraphEdge {
-                    data: GraphEdgeData {
-                        id: eid,
-                        source: mid.clone(),
-                        target: rid_s.clone(),
-                    },
-                });
-            }
-            // 配方 → 输入材料
-            for slot in &r.inputs {
-                let Some((im, _)) = slot.primary() else {
+        let mid = format!("m:{}", m);
+
+        if sign > 0 {
+            // ---- 上游：谁生产 m ----
+            for &rid in &g.producers[m as usize] {
+                if !g.is_plannable(rid) {
                     continue;
-                };
-                let imid = format!("m:{}", im);
-                if seen_nodes.insert(imid.clone()) {
-                    let info = g.material(im);
-                    nodes.push(GraphNode {
-                        data: GraphNodeData {
-                            id: imid.clone(),
-                            label: info.display.clone(),
-                            node_type: "material".to_string(),
-                            material_kind: Some(g.kind_str(info.key.kind).to_string()),
-                            category: None,
-                            count: None,
-                        },
-                    });
                 }
-                let eid = format!("e:{}>{}", rid_s, imid);
-                if seen_edges.insert(eid.clone()) {
-                    edges.push(GraphEdge {
-                        data: GraphEdgeData {
-                            id: eid,
-                            source: rid_s.clone(),
-                            target: imid.clone(),
-                        },
-                    });
+                if exclude_recycling && g.is_recycling(rid) {
+                    continue;
                 }
-                if visited.insert(im) {
-                    queue.push_back((im, d + 1));
+                let r = g.recipe(rid);
+                if r.inputs.is_empty() {
+                    continue;
+                }
+                if nodes.len() >= node_limit {
+                    truncated = true;
+                    break 'bfs;
+                }
+                add_recipe_node(g, &mut nodes, &mut seen_nodes, rid);
+                let rid_s = format!("r:{}", rid);
+                let out_q = gt_planner_core::util::output_qty_of(r, m).unwrap_or(0);
+                // 流向：配方 → 产物 m
+                add_graph_edge(
+                    &mut edges,
+                    &mut seen_edges,
+                    rid_s.clone(),
+                    mid.clone(),
+                    qty_label(g, m, out_q),
+                );
+                let (primaries, pruned) = top_primaries(g, &r.inputs, max_inputs);
+                pruned_edges += pruned;
+                for (im, iq) in primaries {
+                    add_material_node(g, &mut nodes, &mut seen_nodes, im);
+                    let imid = format!("m:{}", im);
+                    // 流向：输入 → 配方
+                    add_graph_edge(
+                        &mut edges,
+                        &mut seen_edges,
+                        imid.clone(),
+                        rid_s.clone(),
+                        qty_label(g, im, iq),
+                    );
+                    if visited.insert((im, 1)) {
+                        queue.push_back((im, d + 1, 1));
+                    }
+                }
+            }
+        } else {
+            // ---- 下游：谁消耗 m ----
+            for &rid in &g.consumers[m as usize] {
+                if !g.is_plannable(rid) {
+                    continue;
+                }
+                if exclude_recycling && g.is_recycling(rid) {
+                    continue;
+                }
+                let r = g.recipe(rid);
+                if r.outputs.is_empty() {
+                    continue;
+                }
+                if nodes.len() >= node_limit {
+                    truncated = true;
+                    break 'bfs;
+                }
+                add_recipe_node(g, &mut nodes, &mut seen_nodes, rid);
+                let rid_s = format!("r:{}", rid);
+                // m 在该配方中的消耗量
+                let mut qty_m = 0u64;
+                for slot in &r.inputs {
+                    for &(mm, q) in &slot.alts {
+                        if mm == m {
+                            qty_m = q;
+                        }
+                    }
+                }
+                add_graph_edge(
+                    &mut edges,
+                    &mut seen_edges,
+                    mid.clone(),
+                    rid_s.clone(),
+                    qty_label(g, m, qty_m),
+                );
+                let (primaries, pruned) = top_primaries(g, &r.outputs, max_outputs);
+                pruned_edges += pruned;
+                for (om, oq) in primaries {
+                    add_material_node(g, &mut nodes, &mut seen_nodes, om);
+                    let omid = format!("m:{}", om);
+                    add_graph_edge(
+                        &mut edges,
+                        &mut seen_edges,
+                        rid_s.clone(),
+                        omid.clone(),
+                        qty_label(g, om, oq),
+                    );
+                    if visited.insert((om, -1)) {
+                        queue.push_back((om, d + 1, -1));
+                    }
                 }
             }
         }
@@ -395,6 +547,8 @@ async fn api_graph(State(st): St, Query(p): Query<GraphParams>) -> Result<Json<G
         nodes,
         edges,
         truncated,
+        pruned_edges,
+        start: format!("m:{}", start),
     }))
 }
 

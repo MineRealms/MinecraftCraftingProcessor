@@ -258,9 +258,10 @@ $("#plan-btn").addEventListener("click", runPlan);
 $("#plan-material").addEventListener("keydown", (e) => { if (e.key === "Enter") runPlan(); });
 
 // ---------------------------------------------------------------------------
-// Graph (cytoscape)
+// Graph (cytoscape) — 分层布局 + 筛选 + 大图性能保护
 // ---------------------------------------------------------------------------
 let cy = null;
+let lastGraph = null; // { nodes, edges, start }
 
 function ensureCy() {
   if (cy) return cy;
@@ -276,10 +277,11 @@ function ensureCy() {
           "font-size": "9px",
           "text-valign": "bottom",
           "text-margin-y": 3,
-          "width": 22,
-          "height": 22,
+          "width": 20,
+          "height": 20,
           "text-max-width": "110px",
           "text-wrap": "ellipsis",
+          "min-zoomed-font-size": 7,
         },
       },
       {
@@ -296,53 +298,203 @@ function ensureCy() {
           "font-size": "7px",
           "text-valign": "bottom",
           "text-margin-y": 2,
-          "width": 14,
-          "height": 14,
+          "width": 13,
+          "height": 13,
           "text-max-width": "90px",
           "text-wrap": "ellipsis",
+          "min-zoomed-font-size": 7,
         },
       },
       {
         selector: "edge",
         style: {
           "width": 1,
-          "line-color": "#3a4152",
-          "target-arrow-color": "#3a4152",
+          "line-color": "#39404f",
+          "target-arrow-color": "#39404f",
           "target-arrow-shape": "triangle",
           "arrow-scale": 0.7,
           "curve-style": "bezier",
+          "font-size": "6px",
+          "color": "#6b7488",
+          "text-rotation": "autorotate",
+          "text-background-color": "#0c0e14",
+          "text-background-opacity": 0.7,
+          "text-background-padding": "1px",
         },
       },
+      { selector: "edge[?label]", style: { label: "data(label)" } },
+      { selector: "node.nolabel", style: { label: "" } },
+      { selector: "node.dim", style: { opacity: 0.12 } },
+      { selector: "edge.dim", style: { opacity: 0.06 } },
+      {
+        selector: "node.hit",
+        style: { "border-width": 3, "border-color": "#ffd166", "border-opacity": 1 },
+      },
     ],
-    layout: { name: "breadthfirst", directed: true, padding: 20, spacingFactor: 1.2 },
     wheelSensitivity: 0.2,
+    motionBlur: false,
   });
   window._cy = cy;
+  cy.on("tap", "node", (evt) => {
+    const matId = evt.target.data("mat_id");
+    if (matId) {
+      showMaterial(matId, null, null);
+      switchTab("material");
+    }
+  });
   return cy;
+}
+
+/** 无向 BFS 分层 + 层内重心排序，返回 {id -> {x, y}} */
+function layeredLayout(g) {
+  const adj = new Map();
+  const ids = new Set(g.nodes.map((n) => n.data.id));
+  ids.forEach((id) => adj.set(id, []));
+  g.edges.forEach((e) => {
+    const s = e.data.source, t = e.data.target;
+    if (!ids.has(s) || !ids.has(t)) return;
+    adj.get(s).push(t);
+    adj.get(t).push(s);
+  });
+
+  const level = new Map();
+  const q = [g.start];
+  level.set(g.start, 0);
+  while (q.length) {
+    const cur = q.shift();
+    const lv = level.get(cur);
+    for (const nb of adj.get(cur) || []) {
+      if (!level.has(nb)) {
+        level.set(nb, lv + 1);
+        q.push(nb);
+      }
+    }
+  }
+
+  const byLevel = new Map();
+  g.nodes.forEach((n) => {
+    const lv = level.has(n.data.id) ? level.get(n.data.id) : 99;
+    if (!byLevel.has(lv)) byLevel.set(lv, []);
+    byLevel.get(lv).push(n.data.id);
+  });
+
+  const pos = new Map();
+  const xGap = 250, yGap = 46;
+  const levels = [...byLevel.keys()].sort((a, b) => a - b);
+  let prevOrder = new Map();
+
+  for (const lv of levels) {
+    const arr = byLevel.get(lv);
+    const bary = (id) => {
+      let sum = 0, cnt = 0;
+      for (const nb of adj.get(id) || []) {
+        if (prevOrder.has(nb)) { sum += prevOrder.get(nb); cnt++; }
+      }
+      return cnt ? sum / cnt : Number.MAX_SAFE_INTEGER;
+    };
+    arr.sort((a, b) => bary(a) - bary(b));
+    const n = arr.length;
+    arr.forEach((id, i) => {
+      pos.set(id, { x: lv * xGap, y: (i - (n - 1) / 2) * yGap });
+      prevOrder.set(id, i);
+    });
+  }
+  return pos;
+}
+
+/** 应用筛选与布局（不重新请求数据） */
+function applyGraphView() {
+  if (!lastGraph || !cy) return;
+  const onlyMat = $("#graph-onlymat").checked;
+  const noLabels = $("#graph-nolabels").checked || lastGraph.nodes.length > 400;
+  const filter = $("#graph-filter").value.trim().toLowerCase();
+  const pos = layeredLayout(lastGraph);
+
+  cy.startBatch();
+  cy.elements().remove();
+  const elements = lastGraph.nodes.map((n) => ({
+    data: n.data,
+    position: pos.get(n.data.id) || { x: 0, y: 0 },
+  }));
+  elements.push(...lastGraph.edges);
+  cy.add(elements);
+
+  const hidden = new Set();
+  if (onlyMat) {
+    cy.nodes('[node_type = "recipe"]').forEach((n) => {
+      hidden.add(n.id());
+      n.style("display", "none");
+    });
+    cy.edges().forEach((e) => {
+      if (hidden.has(e.data("source")) || hidden.has(e.data("target"))) e.style("display", "none");
+    });
+  }
+  cy.nodes().forEach((n) => {
+    n.toggleClass("nolabel", noLabels);
+    if (filter) {
+      const hit = n.id().toLowerCase().includes(filter) || String(n.data("label")).toLowerCase().includes(filter);
+      n.toggleClass("hit", hit);
+      n.toggleClass("dim", !hit);
+    } else {
+      n.removeClass("hit").removeClass("dim");
+    }
+  });
+  if (filter) {
+    cy.edges().forEach((e) => {
+      const hit = e.id().toLowerCase().includes(filter) || String(e.data("label") || "").toLowerCase().includes(filter);
+      e.toggleClass("dim", !hit);
+    });
+  } else {
+    cy.edges().removeClass("dim");
+  }
+  cy.endBatch();
+  cy.fit(cy.elements(":visible"), 40);
 }
 
 async function loadGraph() {
   const material = $("#graph-material").value.trim();
   if (!material) return;
-  const depth = $("#graph-depth").value;
-  const box = $("#cy");
+  const params = new URLSearchParams({
+    material,
+    depth: $("#graph-depth").value,
+    direction: $("#graph-direction").value,
+    max_nodes: $("#graph-maxnodes").value,
+    max_inputs: $("#graph-maxinputs").value,
+    exclude_recycling: $("#graph-norecycle").checked ? "true" : "false",
+  });
+  const status = $("#graph-status");
+  status.textContent = "加载中…";
   try {
-    const d = await api(`/api/graph?material=${encodeURIComponent(material)}&depth=${depth}&limit=500`);
-    const c = ensureCy();
-    c.elements().remove();
-    c.add([...d.nodes, ...d.edges]);
-    c.layout({ name: "breadthfirst", directed: true, padding: 24, spacingFactor: 1.15 }).run();
-    $("#footer-status").textContent =
-      `图谱：${d.nodes.length} 节点 / ${d.edges.length} 边${d.truncated ? "（已截断）" : ""}`;
+    const d = await api(`/api/graph?${params}`);
+    lastGraph = { nodes: d.nodes, edges: d.edges, start: d.start };
+    ensureCy();
+    applyGraphView();
+    status.textContent =
+      `节点 ${d.nodes.length} / 边 ${d.edges.length}` +
+      (d.pruned_edges ? ` · 剪枝隐藏 ${d.pruned_edges} 条边` : "") +
+      (d.truncated ? " · 已达节点上限（可减小深度或提高上限）" : "");
+    $("#footer-status").textContent = `图谱：${material}`;
   } catch (e) {
-    box.innerHTML = "";
-    $("#footer-status").textContent = "图谱加载失败：" + e.message;
+    status.textContent = "加载失败：" + e.message;
   }
 }
 
 $("#graph-btn").addEventListener("click", loadGraph);
 $("#graph-material").addEventListener("keydown", (e) => { if (e.key === "Enter") loadGraph(); });
 $("#graph-depth").addEventListener("input", (e) => { $("#graph-depth-val").textContent = e.target.value; });
+$("#graph-maxnodes").addEventListener("input", (e) => { $("#graph-maxnodes-val").textContent = e.target.value; });
+$("#graph-maxinputs").addEventListener("input", (e) => { $("#graph-maxinputs-val").textContent = e.target.value; });
+["#graph-onlymat", "#graph-nolabels", "#graph-norecycle"].forEach((sel) =>
+  $(sel).addEventListener("change", () => {
+    if (sel === "#graph-norecycle") loadGraph();
+    else applyGraphView();
+  })
+);
+let filterTimer = null;
+$("#graph-filter").addEventListener("input", () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(applyGraphView, 150);
+});
 
 // ---------------------------------------------------------------------------
 // Init
