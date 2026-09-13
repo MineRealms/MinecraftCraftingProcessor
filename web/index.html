@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GT Planner · 工业生产规划器</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">GT&nbsp;Planner <span>GregTech 工业生产规划器</span></div>
+    <div id="stats-chips" class="chips"></div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="search" class="active">搜索</button>
+    <button data-tab="material">材料</button>
+    <button data-tab="planner">规划器</button>
+    <button data-tab="graph">图谱</button>
+  </nav>
+
+  <main>
+    <section id="tab-search" class="tab active">
+      <div class="toolbar">
+        <input id="search-input" placeholder="搜索材料：circuit / copper_ingot / quantum …（回车搜索）">
+        <select id="search-kind">
+          <option value="">全部类型</option>
+          <option value="item">物品</option>
+          <option value="fluid">流体</option>
+        </select>
+        <button id="search-btn">搜索</button>
+      </div>
+      <div id="search-results" class="panel"><div class="placeholder">输入关键词开始搜索</div></div>
+    </section>
+
+    <section id="tab-material" class="tab">
+      <div id="material-content" class="panel"><div class="placeholder">从搜索结果点击一个材料查看详情</div></div>
+    </section>
+
+    <section id="tab-planner" class="tab">
+      <div class="toolbar">
+        <input id="plan-material" placeholder="目标材料 id（如 gtceu:quantum_processor）">
+        <input id="plan-rate" type="number" value="60" min="0.001" step="any" class="num">
+        <span class="unit">/min</span>
+        <select id="plan-mode">
+          <option value="tree">tree · 快速贪心</option>
+          <option value="beam">beam · 局部搜索（推荐）</option>
+        </select>
+        <button id="plan-btn">生成计划</button>
+      </div>
+      <div id="plan-result" class="panel"><div class="placeholder">输入目标材料与速率，生成生产计划</div></div>
+    </section>
+
+    <section id="tab-graph" class="tab">
+      <div class="toolbar">
+        <input id="graph-material" placeholder="材料 id">
+        <label class="slider">深度 <input id="graph-depth" type="range" min="1" max="4" value="2"></label>
+        <span id="graph-depth-val" class="unit">2</span>
+        <button id="graph-btn">加载图谱</button>
+        <span class="hint">方向：材料 → 消耗它的配方 → 上游材料</span>
+      </div>
+      <div id="cy"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>数据：JEI 导出 · 无时长/EU 数据 → 机器数量未计算</span>
+    <span id="footer-status"></span>
+  </footer>
+
+  <script src="vendor/cytoscape.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

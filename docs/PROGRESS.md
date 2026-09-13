@@ -5,9 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M3 Beam Search + Plan IR`
+- 最新提交：`M4 Web API + 前端`
 - 编译状态：✅ `cargo build --workspace` + `cargo test`（13 个单测全过）
-- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.25s；tree 规划 ~1ms；beam ~1.1s
+- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.28s；tree 规划 ~2ms；beam ~1.1s
+- 端到端冒烟：✅ 服务器启动 → stats/search/material/plan(tree+beam)/graph/index.html 全部通过
 - 量子处理器 60/min：tree 成本 66.1 → beam 30.6（beam 以 tree 为基线做配方分配局部搜索）
 
 ## 里程碑看板
@@ -60,12 +61,18 @@
 改为"配方分配 + 完整展开评估"式局部搜索：任何时刻都有完整方案、保证不劣于 tree、
 天然可 GPU 并行（批量评估候选选择表）。
 
-### M4 Web API + 前端 ⬜
-- [ ] axum 路由（stats / search / material / recipe / graph / plan）
-- [ ] tower-http 静态托管 web/
-- [ ] 前端四页：搜索 / 材料详情 / 规划器 / 图谱
-- [ ] 端到端冒烟：启动服务 + 浏览器可达
-- [ ] 提交 + 编译验证
+### M4 Web API + 前端 ✅
+- [x] axum 路由：stats / categories / search / material / graph / plan(POST)
+- [x] tower-http 静态托管 `web/`（cytoscape 已本地 vendor）
+- [x] 前端四页：搜索 / 材料详情（槽 OR 展开）/ 规划器 / 图谱（cytoscape）
+- [x] 冒烟测试：自动启动 → 全部端点验证 → 自动关闭
+- [x] 提交 + 编译验证
+
+**启动方式**（常驻服务，Ctrl+C 停止）：
+```
+cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
+# 浏览器打开 http://127.0.0.1:8787
+```
 
 ### M5 GPU（wgpu） ⬜
 - [ ] 候选状态批量评估 kernel
