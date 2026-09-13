@@ -9,6 +9,8 @@ name = "gt-planner-server"
 path = "src/main.rs"
 
 [dependencies]
+log = { workspace = true }
+env_logger = { workspace = true }
 gt-planner-core = { workspace = true }
 gt-planner-gpu = { path = "../gpu" }
 axum = { workspace = true }

@@ -71,7 +71,20 @@
         <button id="plan-btn">生成计划</button>
         <button id="plan-process" class="ghost">流程图</button>
       </div>
+      <details class="advanced">
+        <summary>高级选项</summary>
+        <div class="toolbar">
+          <label class="slider">Beam 宽度 <input id="adv-beam-width" type="number" value="8" min="1" max="256"></label>
+          <label class="slider">候选/材料 <input id="adv-candidates" type="number" value="3" min="1" max="16"></label>
+          <label class="slider">Beam 轮数 <input id="adv-iterations" type="number" value="12" min="1" max="200"></label>
+          <label class="slider">MCTS 模拟 <input id="adv-mcts-iters" type="number" value="400" min="1" max="100000"></label>
+          <label class="check"><input type="checkbox" id="adv-recycling"> 允许回收类（exact）</label>
+          <label class="check"><input type="checkbox" id="adv-block-amp"> 屏蔽放大环（exact）</label>
+        </div>
+      </details>
       <div id="plan-result" class="panel"><div class="placeholder">输入目标材料与速率，生成生产计划</div></div>
+      <div id="plan-metrics" class="panel"></div>
+      <div id="plan-history" class="panel"></div>
     </section>
 
     <section id="tab-graph" class="tab">

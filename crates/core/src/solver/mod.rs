@@ -26,7 +26,7 @@ use good_lp::{default_solver, variable, Expression, ProblemVariables, Solution, 
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, MaterialKind, RecipeId};
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanMetrics};
 use crate::util::mat_norm_qty;
 
 const EPS: f64 = 1e-9;
@@ -455,6 +455,14 @@ pub fn plan_exact(
         .solve()
         .map_err(|e| format!("LP 求解失败: {}", e))?;
     let status = solution.status();
+    log::info!(
+        "LP：{} 材料 / {} 配方 / {} 变量，状态 {:?}，目标值 {:.4}",
+        materials.len(),
+        lp_recipes.len(),
+        materials.len() + lp_recipes.len(),
+        status,
+        solution.eval(&objective)
+    );
     if std::env::var_os("GTP_DEBUG_SOLVER").is_some() {
         let mut manual = 0.0f64;
         for (i, &v) in ext_vars.iter().enumerate() {
@@ -608,6 +616,21 @@ pub fn plan_exact(
     }
     notes.push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
 
+    let choice_var_count: usize = choice_vars
+        .iter()
+        .flat_map(|v| v.iter().map(Vec::len))
+        .sum();
+    let choice_slot_count: usize = choice_vars
+        .iter()
+        .flat_map(|v| v.iter().filter(|c| !c.is_empty()))
+        .count();
+    let mut metrics = PlanMetrics::default();
+    metrics.lp_variables = Some(materials.len() + lp_recipes.len() + choice_var_count);
+    metrics.lp_constraints = Some(materials.len() + choice_slot_count);
+    metrics.lp_status = Some(format!("{:?}", status));
+    metrics.lp_objective = Some(solution.eval(&objective));
+    metrics.evaluations = 1;
+
     Ok(super::planner::assemble_plan_with_choices(
         g,
         an,
@@ -618,6 +641,7 @@ pub fn plan_exact(
         &raw,
         &byproducts,
         Some(&alt_choices),
+        metrics,
         notes,
         t0.elapsed().as_secs_f64() * 1000.0,
     ))

@@ -36,6 +36,7 @@ const kindName = (k) => (k === "fluid" ? "流体" : k === "item" ? "物品" : k)
 let lang = localStorage.getItem("gtp-lang") || "zh";
 let lastPlan = null;
 let lastSearchQuery = "";
+let lastProcess = null;
 const nm = (m) => (lang === "zh" ? m.display_zh || m.display : m.display_en || m.display);
 function setLang(l, rerender = true) {
   lang = l;
@@ -44,6 +45,7 @@ function setLang(l, rerender = true) {
   $("#lang-toggle").textContent = l === "zh" ? "EN" : "中文";
   if (rerender) {
     if (lastGraph) applyGraphView();
+    if (lastProcess) renderProcess(lastProcess);
     const mid = $("#material-content")?.dataset.matid;
     if (mid) showMaterial(mid, $("#material-content").dataset.matkind || null, $("#material-content").dataset.matnbt || null);
     if (lastPlan) $("#plan-result").innerHTML = renderPlan(lastPlan);
@@ -210,7 +212,28 @@ async function showMaterial(id, kind, nbt) {
 // Planner
 // ---------------------------------------------------------------------------
 function planEntryHtml(e) {
-  return `<span class="alt mono ${kindClass(e.material.kind)}">${esc(nm(e.material))} ×${fmt(e.rate_per_min)}/min</span>`;
+  const chance = e.chance != null ? ` <span class="tag warn">${Math.round(e.chance * 100)}%</span>` : "";
+  return `<span class="alt mono ${kindClass(e.material.kind)}">${esc(nm(e.material))} ×${fmt(e.rate_per_min)}/min${chance}</span>`;
+}
+
+/** 性能计数器行（来自 plan.metrics） */
+function metricLine(p) {
+  const m = p.metrics || {};
+  const parts = [
+    m.analysis_ms ? `分析 ${fmt(m.analysis_ms, 0)}ms` : null,
+    m.expansions ? `展开 ${Number(m.expansions).toLocaleString()}` : null,
+    m.evaluations ? `评估 ${Number(m.evaluations).toLocaleString()}` : null,
+    m.rounds ? `轮次 ${m.rounds}` : null,
+    m.gpu_candidates ? `GPU 候选 ${Number(m.gpu_candidates).toLocaleString()}` : null,
+    m.gpu_solves
+      ? `GPU 求解 ${Number(m.gpu_solves).toLocaleString()}（收敛 ${Number(m.gpu_converged).toLocaleString()}，迭代 ${Number(m.gpu_iters_total).toLocaleString()}）`
+      : null,
+    m.lp_variables
+      ? `LP ${Number(m.lp_variables).toLocaleString()} 变量 / ${Number(m.lp_constraints || 0).toLocaleString()} 约束 / ${m.lp_status || "-"} / 目标值 ${m.lp_objective != null ? fmt(m.lp_objective, 4) : "-"}`
+      : null,
+  ].filter(Boolean);
+  if (!parts.length) return "";
+  return `<div class="muted mono" style="margin:6px 0;font-size:12px">性能指标：${parts.join(" · ")}</div>`;
 }
 
 function renderPlan(p) {
@@ -250,6 +273,7 @@ function renderPlan(p) {
     <h2>生产计划 · <span class="mono ${kindClass(p.target.kind)}">${esc(nm(p.target))}</span>
       × <span class="mono">${fmt(p.rate_per_min)}</span>/min <span class="tag">${esc(p.mode)}</span></h2>
     <div class="plan-summary">${metrics}</div>
+    ${metricLine(p)}
     <h3>配方步骤（按操作量降序）</h3>
     <table>
       <thead><tr><th>op/min</th><th>机器/分类</th><th>配方</th><th>机器数</th><th>EU/t</th><th>等级</th><th>输入</th><th>输出</th></tr></thead>
@@ -288,12 +312,93 @@ async function runPlan() {
         mode,
         max_tier: $("#plan-tier").value || null,
         objective: $("#plan-objective").value || null,
+        beam_width: parseInt($("#adv-beam-width").value, 10) || undefined,
+        candidates: parseInt($("#adv-candidates").value, 10) || undefined,
+        max_iterations: parseInt($("#adv-iterations").value, 10) || undefined,
+        mcts_iterations: parseInt($("#adv-mcts-iters").value, 10) || undefined,
+        include_recycling: $("#adv-recycling").checked,
+        block_amplification: $("#adv-block-amp").checked,
       }),
     });
     lastPlan = p;
     box.innerHTML = renderPlan(p);
+    loadMetrics();
+    loadHistory();
   } catch (e) {
     box.innerHTML = `<div class="placeholder">错误：${esc(e.message)}</div>`;
+  }
+}
+
+/** 运行指标（数据集/分析/运行时计数器） */
+async function loadMetrics() {
+  const box = $("#plan-metrics");
+  if (!box) return;
+  try {
+    const d = await api("/api/metrics");
+    const ds = d.dataset, an = d.analysis, rt = d.runtime;
+    const items = [
+      ["材料", ds.materials],
+      ["配方", ds.recipes],
+      ["名称库", ds.names],
+      ["概率覆盖", ds.chance_overrides],
+      ["SCC 分量", an.scc_components],
+      ["循环分量", an.cyclic_components],
+      ["分析耗时", fmt(an.build_ms, 0) + "ms"],
+      ["规划请求", rt.plan_requests],
+      ["平均耗时", fmt(rt.avg_plan_ms, 0) + "ms"],
+      ["tree/beam/mcts/exact", `${rt.modes.tree}/${rt.modes.beam}/${rt.modes.mcts}/${rt.modes.exact}`],
+      ["运行记录", rt.recorded_runs],
+      ["运行时长", rt.uptime_s + "s"],
+    ];
+    box.innerHTML =
+      `<h3>运行指标</h3><div class="plan-summary">` +
+      items
+        .map(([k, v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${typeof v === "number" ? Number(v).toLocaleString() : esc(String(v))}</div></div>`)
+        .join("") +
+      `</div>`;
+    $("#footer-status").textContent = `请求 ${rt.plan_requests} · 平均 ${fmt(rt.avg_plan_ms, 0)}ms · 记录 ${rt.recorded_runs} 条`;
+  } catch (e) {
+    box.innerHTML = `<div class="muted">指标加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+/** 运行历史（最近 N 条，点击回填表单） */
+async function loadHistory() {
+  const box = $("#plan-history");
+  if (!box) return;
+  try {
+    const d = await api("/api/history?limit=20");
+    if (!d.records || !d.records.length) {
+      box.innerHTML = `<div class="muted">暂无运行记录（文件：${esc(d.path)}）</div>`;
+      return;
+    }
+    const rows = d.records
+      .slice()
+      .reverse()
+      .map(
+        (r) => `<tr class="clickable" data-target="${esc(r.target)}" data-rate="${r.rate_per_min}" data-mode="${esc(r.mode)}">
+        <td class="mono">${esc(r.ts.replace("T", " ").replace("Z", ""))}</td>
+        <td class="mono">${esc(r.target)}</td>
+        <td>${esc(r.mode)}</td>
+        <td class="mono">${fmt(r.rate_per_min)}</td>
+        <td class="mono">${fmt(r.cost)}</td>
+        <td class="mono">${fmt(r.machines, 1)}</td>
+        <td class="mono">${fmt(r.elapsed_ms, 0)}ms</td>
+      </tr>`
+      )
+      .join("");
+    box.innerHTML = `<h3>运行记录（最近 ${d.records.length} 条 · ${esc(d.path)}）</h3>
+      <table><thead><tr><th>时间(UTC)</th><th>目标</th><th>模式</th><th>速率</th><th>成本</th><th>机器</th><th>耗时</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+    box.querySelectorAll("tr.clickable").forEach((tr) =>
+      tr.addEventListener("click", () => {
+        $("#plan-material").value = tr.dataset.target;
+        $("#plan-rate").value = tr.dataset.rate;
+        $("#plan-mode").value = tr.dataset.mode;
+      })
+    );
+  } catch (e) {
+    box.innerHTML = `<div class="muted">历史加载失败：${esc(e.message)}</div>`;
   }
 }
 
@@ -326,6 +431,7 @@ async function loadProcess() {
 }
 
 function renderProcess(pg) {
+  lastProcess = pg;
   const c = ensureCy();
   lastGraph = null; // 流程图模式与材料图谱互斥
   const maxStep = pg.steps.length;
@@ -693,3 +799,5 @@ $("#graph-filter").addEventListener("input", () => {
 // ---------------------------------------------------------------------------
 setLang(lang, false);
 loadStats();
+loadMetrics();
+loadHistory();

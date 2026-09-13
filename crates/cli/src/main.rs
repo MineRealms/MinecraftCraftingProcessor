@@ -27,6 +27,10 @@ struct Cli {
     #[arg(long, global = true)]
     chances: Option<PathBuf>,
 
+    /// 输出调试日志（等价于 RUST_LOG=debug）
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -166,6 +170,9 @@ enum Command {
         /// 额外输出 Process IR（物料流图）
         #[arg(long)]
         process: bool,
+        /// 追加一条运行记录（JSONL）到指定文件
+        #[arg(long)]
+        record: Option<PathBuf>,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -632,10 +639,11 @@ fn cmd_plan(
     no_gpu: bool,
     max_tier: Option<u8>,
     show_process: bool,
+    record_out: Option<&PathBuf>,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let plan = match mode {
+    let mut plan = match mode {
         "tree" => {
             let req = PlanRequest {
                 target: m,
@@ -699,6 +707,8 @@ fn cmd_plan(
             return Err(format!("不支持的模式 \"{}\"（tree / beam / mcts / exact）", other).into());
         }
     };
+
+    plan.metrics.analysis_ms = an.build_ms;
 
     println!("== 生产计划 ==");
     println!(
@@ -810,9 +820,39 @@ fn cmd_plan(
         }
     }
 
+    let m = &plan.metrics;
+    println!();
+    println!(
+        "性能指标    展开 {} | 评估 {} | 轮次 {} | GPU 候选 {} / 求解 {}（收敛 {}，迭代合计 {}）| 分析 {:.0}ms",
+        fmt_num(m.expansions),
+        fmt_num(m.evaluations),
+        fmt_num(m.rounds),
+        fmt_num(m.gpu_candidates),
+        fmt_num(m.gpu_solves),
+        fmt_num(m.gpu_converged),
+        fmt_num(m.gpu_iters_total as usize),
+        m.analysis_ms
+    );
+    if let Some(vars) = m.lp_variables {
+        println!(
+            "LP 规模     {} 变量 / {} 约束 / 状态 {} / 目标值 {}",
+            fmt_num(vars),
+            fmt_num(m.lp_constraints.unwrap_or(0)),
+            m.lp_status.as_deref().unwrap_or("-"),
+            m.lp_objective.map(fmt_rate).unwrap_or_else(|| "-".to_string())
+        );
+    }
+
     if show_process {
         let pg = gt_planner_core::process::ProcessGraph::from_plan(&plan);
         print_process(&pg);
+    }
+
+    if let Some(path) = record_out {
+        let rec = gt_planner_core::PlanRecord::from_plan(&plan, None, max_tier);
+        gt_planner_core::PlanRecord::append_jsonl(path, &rec)?;
+        println!();
+        println!("运行记录已追加到 {}", path.display());
     }
 
     if let Some(path) = json_out {
@@ -1150,6 +1190,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_tier,
             objective,
             process,
+            record,
             verbose,
             json,
         } => {
@@ -1182,6 +1223,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 *no_gpu,
                 mt,
                 *process,
+                record.as_ref(),
                 *verbose,
                 json.as_ref(),
             )?;
@@ -1192,6 +1234,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let default_level = if cli.verbose { "debug" } else { "info" };
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(default_level),
+    )
+    .format_timestamp_millis()
+    .try_init();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

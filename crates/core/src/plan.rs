@@ -15,8 +15,39 @@ pub struct Plan {
     pub raw_materials: Vec<PlanEntry>,
     pub byproducts: Vec<PlanEntry>,
     pub totals: PlanTotals,
+    /// 性能计数器（搜索过程指标）。
+    pub metrics: PlanMetrics,
     pub notes: Vec<String>,
     pub elapsed_ms: f64,
+}
+
+/// 性能计数器：搜索/求解过程的关键指标（用于前端展示与实验统计）。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PlanMetrics {
+    /// Search IR 构建耗时（由调用方填充；CLI/服务器已知）
+    pub analysis_ms: f64,
+    /// 搜索/求解耗时（= plan.elapsed_ms）
+    pub search_ms: f64,
+    /// 搜索展开次数（tree）或迭代轮数（beam/mcts）
+    pub expansions: usize,
+    pub rounds: usize,
+    /// CPU 完整展开评估次数
+    pub evaluations: usize,
+    /// GPU 粗筛候选数
+    pub gpu_candidates: usize,
+    /// GPU 线性系统求解数 / 收敛数 / 迭代总数
+    pub gpu_solves: usize,
+    pub gpu_converged: usize,
+    pub gpu_iters_total: u64,
+    /// LP（exact）规模与状态
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_variables: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_constraints: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_objective: Option<f64>,
 }
 
 /// 计划中的单个配方步骤。

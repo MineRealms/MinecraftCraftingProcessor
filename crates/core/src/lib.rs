@@ -18,6 +18,7 @@ pub mod plan;
 pub mod planner;
 pub mod process;
 pub mod raw;
+pub mod record;
 pub mod solver;
 pub mod util;
 
@@ -33,10 +34,12 @@ pub use model::{
 pub use names::{NameEntry, NameStore};
 pub use plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
 pub use planner::{
-    greedy_choices, plan_beam, plan_beam_with_evaluator, plan_mcts, plan_tree, BatchEvaluator, BeamOptions,
+    greedy_choices, plan_beam, plan_beam_with_evaluator, plan_mcts, plan_tree, BatchEvaluator, BatchStats, BeamOptions,
     MctsOptions, PlanRequest,
 };
+pub use plan::PlanMetrics;
 pub use process::{ProcessFlow, ProcessGraph, ProcessStep};
+pub use record::PlanRecord;
 pub use solver::{plan_exact, ExactOptions};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

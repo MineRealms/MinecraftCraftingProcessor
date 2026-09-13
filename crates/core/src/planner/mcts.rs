@@ -18,7 +18,7 @@ use std::time::Instant;
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, RecipeId};
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanMetrics};
 use crate::planner::beam::recipe_alternatives;
 use crate::planner::tree::{expand_with_choices, PlanRequest, TreeResult};
 
@@ -244,6 +244,11 @@ pub fn plan_mcts(
         }
     ));
 
+    let mut metrics = PlanMetrics::default();
+    metrics.rounds = opts.iterations;
+    metrics.expansions = expanded;
+    metrics.evaluations = evaluations;
+
     super::assemble_plan(
         g,
         an,
@@ -253,6 +258,7 @@ pub fn plan_mcts(
         &best.ops,
         &best.raw,
         &best.byproducts,
+        metrics,
         notes,
         t0.elapsed().as_secs_f64() * 1000.0,
     )

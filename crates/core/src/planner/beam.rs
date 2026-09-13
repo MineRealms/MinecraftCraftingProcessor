@@ -18,7 +18,7 @@ use std::time::Instant;
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, RecipeId};
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanMetrics};
 use crate::planner::tree::{expand_with_choices, PlanRequest, TreeResult};
 use crate::util::{mat_norm_qty, output_qty_of, recipe_cost};
 
@@ -52,6 +52,15 @@ impl Default for BeamOptions {
     }
 }
 
+/// 批量评估器的运行统计。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BatchStats {
+    pub candidates: usize,
+    pub solves: usize,
+    pub converged: usize,
+    pub iters: u64,
+}
+
 /// 批量候选评估器（GPU 实现挂在这里；返回得分，越小越好）。
 pub trait BatchEvaluator {
     /// 用基线方案初始化评估上下文（如构建评估子图、上传缓冲）。
@@ -67,6 +76,11 @@ pub trait BatchEvaluator {
     }
 
     fn evaluate(&self, choices: &[HashMap<MaterialId, RecipeId>]) -> Vec<f64>;
+
+    /// 运行统计（性能计数器；默认无）
+    fn stats(&self) -> Option<BatchStats> {
+        None
+    }
 
     /// 评估器名称（写入计划备注）
     fn name(&self) -> String {
@@ -382,6 +396,17 @@ pub fn plan_beam_with_evaluator(
     ));
     notes.push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
 
+    // 性能计数器
+    let mut metrics = PlanMetrics::default();
+    metrics.rounds = st.rounds;
+    metrics.evaluations = st.evals;
+    metrics.gpu_candidates = batch_evaluated;
+    if let Some(bs) = evaluator.as_deref().and_then(|e| e.stats()) {
+        metrics.gpu_solves = bs.solves;
+        metrics.gpu_converged = bs.converged;
+        metrics.gpu_iters_total = bs.iters;
+    }
+
     super::assemble_plan(
         g,
         an,
@@ -391,6 +416,7 @@ pub fn plan_beam_with_evaluator(
         &st.best.ops,
         &st.best.raw,
         &st.best.byproducts,
+        metrics,
         notes,
         t0.elapsed().as_secs_f64() * 1000.0,
     )

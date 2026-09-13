@@ -15,7 +15,7 @@ use std::time::Instant;
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, RecipeId};
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanMetrics};
 use crate::util::{cheapest_alt, mat_norm_qty, output_qty_of};
 
 const EPS: f64 = 1e-9;
@@ -95,6 +95,8 @@ pub(crate) struct TreeResult {
     pub estimated_cost: f64,
     /// 总操作量。
     pub ops_total: f64,
+    /// 展开次数（性能计数器）。
+    pub expansions: usize,
 }
 
 fn add_demand(
@@ -345,6 +347,7 @@ pub(crate) fn expand_tree(
         notes,
         estimated_cost,
         ops_total,
+        expansions,
     }
 }
 
@@ -354,6 +357,9 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
     let mut res = expand_tree(g, an, req, &HashMap::new());
     res.notes
         .push("原版配方无 GT 时长/耗电数据，机器数与 EU 仅统计 GT 配方".to_string());
+    let mut metrics = PlanMetrics::default();
+    metrics.expansions = res.expansions;
+    metrics.evaluations = 1;
     super::assemble_plan(
         g,
         an,
@@ -363,6 +369,7 @@ pub fn plan_tree(g: &KnowledgeGraph, an: &Analysis, req: &PlanRequest) -> Plan {
         &res.ops,
         &res.raw,
         &res.byproducts,
+        metrics,
         res.notes,
         t0.elapsed().as_secs_f64() * 1000.0,
     )

@@ -5,6 +5,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,11 +23,27 @@ use gt_planner_core::graph::KnowledgeGraph;
 use gt_planner_core::model::{MaterialId, MaterialKind, RecipeId};
 use gt_planner_core::planner::{plan_beam, plan_tree, BeamOptions, PlanRequest};
 use gt_planner_core::plan::Plan;
+use gt_planner_core::record::PlanRecord;
+
+/// 运行时性能计数器（原子累加）。
+#[derive(Default)]
+struct Metrics {
+    requests: AtomicU64,
+    plan_requests: AtomicU64,
+    total_plan_ms: AtomicU64,
+    mode_tree: AtomicU64,
+    mode_beam: AtomicU64,
+    mode_mcts: AtomicU64,
+    mode_exact: AtomicU64,
+    recorded_runs: AtomicU64,
+}
 
 struct AppState {
     graph: KnowledgeGraph,
     analysis: Analysis,
     loaded_at: Instant,
+    log_dir: std::path::PathBuf,
+    metrics: Metrics,
 }
 
 type St = State<Arc<AppState>>;
@@ -564,7 +581,7 @@ async fn api_graph(State(st): St, Query(p): Query<GraphParams>) -> Result<Json<G
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PlanReq {
     material: String,
     kind: Option<String>,
@@ -617,7 +634,7 @@ fn build_plan(state: &AppState, req: &PlanReq) -> Result<Plan, ApiError> {
     };
     let custom_an = weights.map(|w| Analysis::build_with(g, 48, w));
     let an: &Analysis = custom_an.as_ref().unwrap_or(&state.analysis);
-    let plan = match mode.as_str() {
+    let mut plan = match mode.as_str() {
         "beam" => {
             let opts = BeamOptions {
                 beam_width: req.beam_width.unwrap_or(8),
@@ -667,15 +684,115 @@ fn build_plan(state: &AppState, req: &PlanReq) -> Result<Plan, ApiError> {
             plan_tree(g, an, &preq)
         }
     };
+    plan.metrics.analysis_ms = an.build_ms;
     Ok(plan)
 }
 
 async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
     let state = Arc::clone(&st);
+    let req2 = req.clone();
     let plan = tokio::task::spawn_blocking(move || build_plan(&state, &req))
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("规划任务失败: {e}")))??;
+
+    // 性能计数器 + 运行记录
+    let m = &st.metrics;
+    m.plan_requests.fetch_add(1, Ordering::Relaxed);
+    m.total_plan_ms
+        .fetch_add(plan.elapsed_ms as u64, Ordering::Relaxed);
+    match plan.mode.as_str() {
+        "tree" => m.mode_tree.fetch_add(1, Ordering::Relaxed),
+        "beam" => m.mode_beam.fetch_add(1, Ordering::Relaxed),
+        "mcts" => m.mode_mcts.fetch_add(1, Ordering::Relaxed),
+        "exact" => m.mode_exact.fetch_add(1, Ordering::Relaxed),
+        _ => 0,
+    };
+    let max_tier = req2.max_tier.as_deref().and_then(|s| {
+        s.trim()
+            .parse::<u8>()
+            .ok()
+            .or_else(|| gt_planner_core::util::tier_index_from_name(s))
+    });
+    let rec = PlanRecord::from_plan(&plan, req2.objective.as_deref(), max_tier);
+    let runs_path = st.log_dir.join("runs.jsonl");
+    if let Err(e) = PlanRecord::append_jsonl(&runs_path, &rec) {
+        log::warn!("运行记录写入失败: {e}");
+    } else {
+        m.recorded_runs.fetch_add(1, Ordering::Relaxed);
+    }
+    log::info!(
+        "plan {} × {} [{}] -> {} 配方 / 成本 {:.2} / {:.0}ms",
+        rec.target,
+        rec.rate_per_min,
+        rec.mode,
+        rec.recipes,
+        rec.cost,
+        rec.elapsed_ms
+    );
     Ok(Json(plan))
+}
+
+#[derive(Deserialize)]
+struct HistoryParams {
+    limit: Option<usize>,
+}
+
+/// 运行历史（JSONL 最后 N 条）。
+async fn api_history(
+    State(st): St,
+    Query(p): Query<HistoryParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = p.limit.unwrap_or(50).min(500);
+    let path = st.log_dir.join("runs.jsonl");
+    let records = PlanRecord::read_jsonl(&path, limit)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("读取记录失败: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "path": path.display().to_string(),
+        "count": records.len(),
+        "records": records,
+    })))
+}
+
+/// 性能计数器 + 数据集/分析指标。
+async fn api_metrics(State(st): St) -> Json<serde_json::Value> {
+    let m = &st.metrics;
+    let plan_requests = m.plan_requests.load(Ordering::Relaxed);
+    let total_ms = m.total_plan_ms.load(Ordering::Relaxed);
+    let avg_ms = if plan_requests > 0 {
+        total_ms as f64 / plan_requests as f64
+    } else {
+        0.0
+    };
+    Json(serde_json::json!({
+        "dataset": {
+            "materials": st.graph.stats.material_count,
+            "recipes": st.graph.stats.recipe_count,
+            "categories": st.graph.stats.category_count,
+            "plannable_recipes": st.graph.stats.plannable_recipe_count,
+            "names": st.graph.names.len(),
+            "chance_overrides": st.graph.chances.len(),
+        },
+        "analysis": {
+            "build_ms": st.analysis.build_ms,
+            "scc_components": st.analysis.scc.sizes.len(),
+            "cyclic_components": st.analysis.cond.cyclic_component_count(),
+            "cost_iterations": st.analysis.cost.iterations,
+            "cost_converged": st.analysis.cost.converged,
+        },
+        "runtime": {
+            "requests": m.requests.load(Ordering::Relaxed),
+            "plan_requests": plan_requests,
+            "avg_plan_ms": avg_ms,
+            "modes": {
+                "tree": m.mode_tree.load(Ordering::Relaxed),
+                "beam": m.mode_beam.load(Ordering::Relaxed),
+                "mcts": m.mode_mcts.load(Ordering::Relaxed),
+                "exact": m.mode_exact.load(Ordering::Relaxed),
+            },
+            "recorded_runs": m.recorded_runs.load(Ordering::Relaxed),
+            "uptime_s": st.loaded_at.elapsed().as_secs(),
+        }
+    }))
 }
 
 /// Process IR：物料流图。
@@ -699,11 +816,15 @@ async fn api_process(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .try_init();
     let args: Vec<String> = std::env::args().collect();
     let mut data = std::env::var("GTP_DATA").unwrap_or_else(|_| "jei_recipes.json".to_string());
     let mut names: Option<String> = std::env::var("GTP_NAMES").ok();
     let mut port: u16 = 8787;
     let mut web = "web".to_string();
+    let mut log_dir = "logs".to_string();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -722,6 +843,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--web" => {
                 i += 1;
                 web = args.get(i).cloned().unwrap_or(web);
+            }
+            "--log-dir" => {
+                i += 1;
+                log_dir = args.get(i).cloned().unwrap_or(log_dir);
             }
             other => eprintln!("未知参数: {}", other),
         }
@@ -765,10 +890,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         analysis.build_ms / 1000.0
     );
 
+    let log_dir = PathBuf::from(&log_dir);
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("警告：无法创建日志目录 {}: {e}", log_dir.display());
+    }
+    log::info!("运行记录目录: {}", log_dir.display());
     let state = Arc::new(AppState {
         graph,
         analysis,
         loaded_at: Instant::now(),
+        log_dir,
+        metrics: Metrics::default(),
     });
 
     let index = format!("{}/index.html", web);
@@ -782,6 +914,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/graph", get(api_graph))
         .route("/api/plan", post(api_plan))
         .route("/api/process", post(api_process))
+        .route("/api/history", get(api_history))
+        .route("/api/metrics", get(api_metrics))
         .fallback_service(static_files)
         .layer(CorsLayer::permissive())
         .with_state(state);

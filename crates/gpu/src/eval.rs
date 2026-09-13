@@ -7,11 +7,12 @@
 //! 得分用于 beam 局部搜索的粗筛（top-K 再交给 CPU 完整展开精评）。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use gt_planner_core::analysis::Analysis;
 use gt_planner_core::graph::KnowledgeGraph;
 use gt_planner_core::model::{MaterialId, RecipeId};
-use gt_planner_core::planner::BatchEvaluator;
+use gt_planner_core::planner::{BatchEvaluator, BatchStats};
 
 use crate::linear::{FlowSystem, GpuFlowSolver, GpuUnavailable, SolveResult};
 use crate::subgraph::{build_subgraph_from_plan, CandidateTable, SubgraphData};
@@ -31,6 +32,11 @@ pub struct GpuEvaluator {
     solver: GpuFlowSolver,
     sg: Option<SubgraphData>,
     demand: Vec<f32>,
+    // 性能计数器
+    stat_candidates: AtomicUsize,
+    stat_solves: AtomicUsize,
+    stat_converged: AtomicUsize,
+    stat_iters: AtomicU64,
 }
 
 impl GpuEvaluator {
@@ -40,6 +46,10 @@ impl GpuEvaluator {
             solver: GpuFlowSolver::new()?,
             sg: None,
             demand: Vec::new(),
+            stat_candidates: AtomicUsize::new(0),
+            stat_solves: AtomicUsize::new(0),
+            stat_converged: AtomicUsize::new(0),
+            stat_iters: AtomicU64::new(0),
         })
     }
 
@@ -76,6 +86,13 @@ impl GpuEvaluator {
             .map(|(_, t)| FlowSystem::from_candidate(sg, t, &self.demand))
             .collect();
         let results: Vec<SolveResult> = self.solver.solve_batch(&systems, MAX_ITERS, TOL);
+        self.stat_solves.fetch_add(results.len(), Ordering::Relaxed);
+        self.stat_converged
+            .fetch_add(results.iter().filter(|r| r.converged).count(), Ordering::Relaxed);
+        self.stat_iters.fetch_add(
+            results.iter().map(|r| r.iterations as u64).sum(),
+            Ordering::Relaxed,
+        );
         let mut out = Vec::with_capacity(chunk.len());
         for ((idx, _), (sys, res)) in chunk.iter().zip(systems.iter().zip(results.iter())) {
             // 钳制解（发散系统会产生巨大/非有限值），保留排序信息
@@ -130,15 +147,14 @@ impl BatchEvaluator for GpuEvaluator {
                 valid.push((i, t));
             }
         }
-        if std::env::var_os("GTP_DEBUG_GPU").is_some() {
-            eprintln!(
-                "gpu evaluate: subgraph {} materials / {} recipes, candidates {} valid {}",
-                sg.materials.len(),
-                sg.recipes.len(),
-                choices.len(),
-                valid.len()
-            );
-        }
+        log::debug!(
+            "gpu evaluate: subgraph {} materials / {} recipes, candidates {} valid {}",
+            sg.materials.len(),
+            sg.recipes.len(),
+            choices.len(),
+            valid.len()
+        );
+        self.stat_candidates.fetch_add(valid.len(), Ordering::Relaxed);
 
         for chunk in valid.chunks(BATCH) {
             for (idx, score) in self.evaluate_chunk(sg, chunk) {
@@ -150,5 +166,14 @@ impl BatchEvaluator for GpuEvaluator {
 
     fn name(&self) -> String {
         format!("wgpu-bicgstab({})", self.solver.adapter_name)
+    }
+
+    fn stats(&self) -> Option<BatchStats> {
+        Some(BatchStats {
+            candidates: self.stat_candidates.load(Ordering::Relaxed),
+            solves: self.stat_solves.load(Ordering::Relaxed),
+            converged: self.stat_converged.load(Ordering::Relaxed),
+            iters: self.stat_iters.load(Ordering::Relaxed),
+        })
     }
 }

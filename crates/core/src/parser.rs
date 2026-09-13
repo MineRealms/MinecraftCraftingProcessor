@@ -60,7 +60,16 @@ pub fn build_from_root(root: RawRoot) -> Result<KnowledgeGraph> {
     for cat in &root.categories {
         b.add_category(cat);
     }
-    Ok(b.finish())
+    let g = b.finish();
+    log::info!(
+        "构图完成：{} 材料 / {} 配方 / {} 分类（{} 可规划 / {} 可采集）",
+        g.stats.material_count,
+        g.stats.recipe_count,
+        g.stats.category_count,
+        g.stats.plannable_recipe_count,
+        g.stats.harvestable_material_count
+    );
+    Ok(g)
 }
 
 /// NBT 空串归一为 None。

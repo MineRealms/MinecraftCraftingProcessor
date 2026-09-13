@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+log = { workspace = true }
 gt-planner-core = { workspace = true }
 wgpu = { version = "27", default-features = false, features = ["dx12", "metal", "vulkan", "gles", "wgsl"] }
 pollster = "0.4"

@@ -705,6 +705,14 @@ impl GpuFlowSolver {
         drop(x_data);
         info_staging.unmap();
         x_staging.unmap();
+        let converged = out.iter().filter(|r| r.converged).count();
+        let iters: u32 = out.iter().map(|r| r.iterations).sum();
+        log::debug!(
+            "bicgstab batch: {} 系统 / 收敛 {} / 迭代合计 {}",
+            out.len(),
+            converged,
+            iters
+        );
         out
     }
 }

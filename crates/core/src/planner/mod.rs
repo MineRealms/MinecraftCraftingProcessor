@@ -7,7 +7,8 @@ pub mod mcts;
 pub mod tree;
 
 pub use beam::{
-    plan_beam, plan_beam_with_evaluator, recipe_alternatives, BatchEvaluator, BeamOptions,
+    plan_beam, plan_beam_with_evaluator, recipe_alternatives, BatchEvaluator, BatchStats,
+    BeamOptions,
 };
 pub use mcts::{plan_mcts, MctsOptions};
 pub use tree::{greedy_choices, plan_tree, PlanRequest};
@@ -15,7 +16,7 @@ pub use tree::{greedy_choices, plan_tree, PlanRequest};
 use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, MaterialKind, RecipeId};
-use crate::plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
+use crate::plan::{Plan, PlanEntry, PlanMetrics, PlanTotals, PlannedRecipe};
 use crate::util::{cheapest_alt, mat_norm_qty};
 
 const EPS: f64 = 1e-9;
@@ -39,6 +40,7 @@ pub(crate) fn assemble_plan(
     ops: &[(RecipeId, f64)],
     raw: &[(MaterialId, f64)],
     byproducts: &[(MaterialId, f64)],
+    metrics: PlanMetrics,
     notes: Vec<String>,
     elapsed_ms: f64,
 ) -> Plan {
@@ -52,6 +54,7 @@ pub(crate) fn assemble_plan(
         raw,
         byproducts,
         None,
+        metrics,
         notes,
         elapsed_ms,
     )
@@ -69,6 +72,7 @@ pub(crate) fn assemble_plan_with_choices(
     raw: &[(MaterialId, f64)],
     byproducts: &[(MaterialId, f64)],
     alt_choices: Option<&std::collections::HashMap<RecipeId, Vec<MaterialId>>>,
+    mut metrics: PlanMetrics,
     mut notes: Vec<String>,
     elapsed_ms: f64,
 ) -> Plan {
@@ -232,6 +236,7 @@ pub(crate) fn assemble_plan_with_choices(
             + an.cost.weights.machine * total_machines,
     };
 
+    metrics.search_ms = elapsed_ms;
     Plan {
         target: g.material_dto(target),
         rate_per_min,
@@ -240,6 +245,7 @@ pub(crate) fn assemble_plan_with_choices(
         raw_materials: raw_entries,
         byproducts: byproduct_entries,
         totals,
+        metrics,
         notes,
         elapsed_ms,
     }

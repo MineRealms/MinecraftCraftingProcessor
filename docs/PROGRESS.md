@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M10 GPU 矩阵求解器升级（BiCGSTAB）`
-- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 14 + gpu 3 个单测全过）
-- 规划模式：tree / beam（GPU BiCGSTAB 粗筛 + CPU 局部搜索）/ mcts / exact
-- 同口径对比（balanced 权重，QP 60/min）：beam(GPU) 成本 46.6 vs beam(CPU) 97.8；mcts 69.6（200 次模拟）
+- 最新提交：`M11 日志 / 性能计数器 / 运行记录 + 前端选项`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 15 + gpu 3 个单测全过）
+- 规划模式：tree / beam（GPU BiCGSTAB 粗筛）/ mcts / exact；全部带性能计数器
+- 前端：高级选项（beam/MCTS/回收/放大环）、运行指标面板、运行历史（点击回填）、概率产出徽章
 
 ## 里程碑看板
 
@@ -72,6 +72,26 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M11 日志 / 性能计数器 / 运行记录 ✅
+- [x] **结构化日志**：core/gpu 关键路径 `log` 埋点（构图、Search IR、LP、BiCGSTAB 批量）；
+      CLI `-v` / `RUST_LOG`；服务器默认 info（含每次规划请求日志）
+- [x] **性能计数器 `PlanMetrics`**：贯穿 Plan IR → CLI 输出 → API → 前端：
+      展开次数 / 评估次数 / 轮次 / GPU 候选数 / GPU 求解数 / 收敛数 / 迭代合计 /
+      LP 变量数 / 约束数 / 状态 / 目标值 / 分析耗时
+- [x] **运行记录 `PlanRecord`（JSONL）**：
+      - CLI `--record <path>` 追加一条
+      - 服务器 `--log-dir logs` 自动记录每次规划（`runs.jsonl`）
+      - `GET /api/history?limit=N` 读取最近记录
+      - 时间戳自实现 UTC ISO8601（零依赖，含单测）
+- [x] **`GET /api/metrics`**：数据集/分析（SCC、循环分量、成本迭代）/ 运行时计数器
+      （请求数、平均耗时、模式分布、记录数、运行时长）
+- [x] **前端更新**：
+      - 高级选项面板（Beam 宽度 / 候选数 / 轮数 / MCTS 模拟 / 允许回收 / 屏蔽放大环）
+      - 运行指标面板（自动刷新）+ 运行历史表（点击回填目标/速率/模式）
+      - 概率产出徽章（`chance < 1` 显示百分比）
+      - 流程图在语言切换时正确重渲染；计划结果展示性能指标行
+- [x] 冒烟：3 种模式记录写入 `runs.jsonl`、`/api/history`、`/api/metrics`、前端元素齐全
 
 ### M10 GPU 矩阵求解器升级：BiCGSTAB ✅
 - [x] `gpu/linear.rs` 重写：**BiCGSTAB**（双共轭梯度稳定化，处理非对称 A）替代朴素定点迭代；

@@ -35,6 +35,16 @@ impl Analysis {
         let cost = cost::build(g, &cond, cost_iters, weights);
         let dominated_for = prune::dominance_pruning(g, &cost.unit_cost);
         let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let dominated_count = dominated_for.iter().filter(|v| !v.is_empty()).count();
+        log::info!(
+            "Search IR：{} SCC（{} 个循环分量）/ 成本迭代 {} 轮（收敛={}）/ 被支配配方 {} / {:.1}ms",
+            scc.sizes.len(),
+            cond.cyclic_component_count(),
+            cost.iterations,
+            cost.converged,
+            dominated_count,
+            build_ms
+        );
         Self {
             scc,
             cond,

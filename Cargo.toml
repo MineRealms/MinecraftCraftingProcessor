@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
+log = "0.4"
+env_logger = "0.11"
 
 gt-planner-core = { path = "crates/core" }
 
