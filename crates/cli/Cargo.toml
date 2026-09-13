@@ -10,5 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 gt-planner-core = { workspace = true }
+gt-planner-gpu = { path = "../gpu" }
 clap = { workspace = true }
 serde_json = { workspace = true }

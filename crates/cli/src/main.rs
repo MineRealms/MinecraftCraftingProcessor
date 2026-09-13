@@ -98,6 +98,9 @@ enum Command {
         /// exact 模式：屏蔽"循环+材料放大"配方（保守，可能误伤正常制造）
         #[arg(long)]
         block_amplification: bool,
+        /// beam 模式：禁用 GPU 批量评估（强制 CPU 路径）
+        #[arg(long)]
+        no_gpu: bool,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -479,6 +482,7 @@ fn cmd_plan(
     max_iterations: usize,
     include_recycling: bool,
     block_amplification: bool,
+    no_gpu: bool,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -499,7 +503,27 @@ fn cmd_plan(
                 sample_per_state: 24,
                 ops_penalty: 0.001,
             };
-            gt_planner_core::planner::plan_beam(g, an, m, rate, &opts)
+            // GPU 批量评估（不可用则自动回退 CPU）
+            let mut evaluator = if no_gpu {
+                None
+            } else {
+                match gt_planner_gpu::GpuEvaluator::new() {
+                    Ok(ev) => {
+                        eprintln!("GPU 评估器就绪: {}", ev.adapter_name());
+                        Some(ev)
+                    }
+                    Err(e) => {
+                        eprintln!("{}；回退 CPU 路径", e);
+                        None
+                    }
+                }
+            };
+            match evaluator.as_mut() {
+                Some(ev) => gt_planner_core::planner::plan_beam_with_evaluator(
+                    g, an, m, rate, &opts, Some(ev),
+                ),
+                None => gt_planner_core::planner::plan_beam(g, an, m, rate, &opts),
+            }
         }
         "exact" => {
             let opts = gt_planner_core::solver::ExactOptions {
@@ -662,6 +686,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_ops,
             include_recycling,
             block_amplification,
+            no_gpu,
             verbose,
             json,
         } => {
@@ -685,6 +710,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 *max_iterations,
                 *include_recycling,
                 *block_amplification,
+                *no_gpu,
                 *verbose,
                 json.as_ref(),
             )?;

@@ -5,11 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M4 Web API + 前端`
+- 最新提交：`M5 GPU 批量评估 + 图谱优化 + exact LP`
 - 编译状态：✅ `cargo build --workspace` + `cargo test`（13 个单测全过）
-- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.28s；tree 规划 ~2ms；beam ~1.1s
-- 端到端冒烟：✅ 服务器启动 → stats/search/material/plan(tree+beam)/graph/index.html 全部通过
-- 量子处理器 60/min：tree 成本 66.1 → beam 30.6（beam 以 tree 为基线做配方分配局部搜索）
+- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.3s；tree ~1ms；beam(CPU) ~1.1s；beam(GPU) ~1.4s；exact ~0.7s
+- QP 60/min 成本对比：tree 66.1 → beam(CPU) 30.6 → **beam(GPU) 29.3**；exact LP 目标值 38.99（Optimal，物料平衡模型）
 
 ## 里程碑看板
 
@@ -74,10 +73,17 @@ cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
 
-### M5 GPU（wgpu） ⬜
-- [ ] 候选状态批量评估 kernel
-- [ ] GPU Top-K（radix sort）
-- [ ] 与 CPU 版本结果对照
+### M5 GPU（wgpu） ✅
+- [x] 新 crate `crates/gpu`：wgpu 27 计算管线（RTX 4060 实测；无 GPU 时软件回退/CPU 回退）
+- [x] WGSL 核：对每份候选选择表并行做"物料平衡定点迭代"，输出粗筛得分
+- [x] 子图**从基线方案构建**（chosen + top-N 替代配方的闭包），保证候选完整记账
+- [x] `BatchEvaluator` 抽象：core 定义 trait，GPU 实现；beam 路径 = GPU 全量扰动粗筛 → CPU 精评 top-48 → CPU 采样兜底（保证不劣于纯 CPU）
+- [x] CLI `--no-gpu`；服务器 beam 自动使用 GPU
+- [x] 实测：QP 60/min 4656 个候选 GPU 粗筛（1.4s，成本 29.31，优于纯 CPU 30.62）
+
+### 图谱优化 ✅（M4.5）
+- [x] 服务端：流向修正（输入 → 配方 → 产物）、方向 up/down/both、每配方 top-N 输入/输出剪枝、节点上限、边数量标签、点击跳转材料
+- [x] 前端：自研分层布局（层内重心排序，避免堆叠）、筛选器（隐藏回收/只显示材料/隐藏标签/高亮过滤）、`min-zoomed-font-size` 大图保护、批量更新
 
 ### M6 多目标优化 ⬜
 - [ ] 权重化 F = w_m·M + w_e·E + w_t·T + w_r·R

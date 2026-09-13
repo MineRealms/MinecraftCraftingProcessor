@@ -78,9 +78,13 @@ cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 - [x] Phase 0 项目骨架 + 文档
 - [x] Phase 1 解析器 + Knowledge Graph + CLI stats（126MB JSON ~1.6s）
 - [x] Phase 2 SCC / 剪枝 / 启发式 + 确定性展开
-- [x] Phase 3 Beam Search 规划器 + Plan IR（QP 60/min：成本 66.1 → 30.6）
-- [x] Phase 4 Web API + 前端可视化（axum + cytoscape）
-- [ ] Phase 5 GPU 加速（wgpu）：候选评估 / GPU Top-K
-- [ ] Phase 6 高级：MILP / CP-SAT / Pareto 多目标
+- [x] Phase 3 Beam Search 规划器 + Plan IR
+- [x] Phase 4 Web API + 前端可视化（axum + cytoscape，含图谱筛选/分层布局）
+- [x] Phase 5 GPU 加速（wgpu）：候选批量评估（beam 粗筛，RTX 4060 实测）
+- [x] Phase 6a LP 精确求解（good_lp + microlp，物料平衡模型）
+- [ ] Phase 6b 多目标（材料/电耗/时间/机器数）+ Pareto 前沿
+
+实测（量子处理器 60/min，成本=原始物品当量）：
+tree 66.1 → beam(CPU) 30.6 → **beam(GPU) 29.3**；exact LP 目标值 38.99（Optimal）
 
 详见 `docs/PLAN.md` 与 `docs/PROGRESS.md`（含数据踩坑记录）。

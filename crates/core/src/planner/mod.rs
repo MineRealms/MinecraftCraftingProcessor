@@ -5,7 +5,9 @@
 pub mod beam;
 pub mod tree;
 
-pub use beam::{plan_beam, BeamOptions};
+pub use beam::{
+    plan_beam, plan_beam_with_evaluator, recipe_alternatives, BatchEvaluator, BeamOptions,
+};
 pub use tree::{plan_tree, PlanRequest};
 
 use crate::analysis::Analysis;

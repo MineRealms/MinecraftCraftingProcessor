@@ -1,0 +1,11 @@
+[package]
+name = "gt-planner-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gt-planner-core = { workspace = true }
+wgpu = { version = "27", default-features = false, features = ["dx12", "metal", "vulkan", "gles", "wgsl"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }

@@ -571,8 +571,8 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
         return Err(bad_request("rate 必须是正数"));
     }
     let mode = req.mode.unwrap_or_else(|| "tree".to_string());
-    if mode != "tree" && mode != "beam" {
-        return Err(bad_request("mode 只支持 tree / beam"));
+    if mode != "tree" && mode != "beam" && mode != "exact" {
+        return Err(bad_request("mode 只支持 tree / beam / exact"));
     }
     let state = Arc::clone(&st);
     let plan = tokio::task::spawn_blocking(move || {
@@ -588,7 +588,16 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                     sample_per_state: 24,
                     ops_penalty: 0.001,
                 };
-                plan_beam(g, an, m, req.rate, &opts)
+                // GPU 批量评估（不可用则回退 CPU）
+                match gt_planner_gpu::GpuEvaluator::new() {
+                    Ok(mut ev) => gt_planner_core::planner::plan_beam_with_evaluator(
+                        g, an, m, req.rate, &opts, Some(&mut ev),
+                    ),
+                    Err(e) => {
+                        eprintln!("{}；beam 使用 CPU 路径", e);
+                        plan_beam(g, an, m, req.rate, &opts)
+                    }
+                }
             }
             "exact" => {
                 let opts = gt_planner_core::solver::ExactOptions {

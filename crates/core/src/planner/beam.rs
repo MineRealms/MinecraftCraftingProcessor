@@ -3,13 +3,14 @@
 //! 设计（与逐步需求展开不同，更适合本领域）：
 //! 1. 以确定性展开（tree）的贪心解为基线；
 //! 2. 每个候选状态 = 一份"材料 → 配方"选择表；
-//! 3. 扰动：采样若干材料，把其配方换成次优候选（top-N）；
+//! 3. 扰动：把某材料的配方换成次优候选（top-N）；
 //! 4. 用**完整展开**评估每个候选（保证候选都是完整方案）；
 //! 5. 保留得分最优的 K 份选择表进入下一轮，直到无改进或轮数用尽。
 //!
-//! 得分 = 估算成本（原始物品当量）+ λ·总操作量。
-//! 好处：任何时刻都有完整方案；保证不劣于 tree 基线；
-//! 后续 GPU 化的目标正是"批量评估候选选择表"这一步。
+//! 两条路径：
+//! - CPU 采样：每轮采样若干材料做扰动（默认）；
+//! - 批量评估（GPU）：枚举**全部**单点扰动 → 批量粗筛 → CPU 精评 top-K，
+//!   最后再跑一轮 CPU 采样兜底（保证不劣于纯 CPU 路径）。
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -18,7 +19,7 @@ use crate::analysis::Analysis;
 use crate::graph::KnowledgeGraph;
 use crate::model::{MaterialId, RecipeId};
 use crate::plan::Plan;
-use crate::planner::tree::{expand_with_choices, PlanRequest};
+use crate::planner::tree::{expand_with_choices, PlanRequest, TreeResult};
 use crate::util::{mat_norm_qty, output_qty_of, recipe_cost};
 
 /// Beam 规划参数。
@@ -30,7 +31,7 @@ pub struct BeamOptions {
     pub candidate_limit: usize,
     /// 局部搜索轮数。
     pub max_iterations: usize,
-    /// 每份选择表采样扰动的材料数。
+    /// 每份选择表采样扰动的材料数（CPU 路径）。
     pub sample_per_state: usize,
     /// 操作量罚项（每 op 的原料当量代价）。
     pub ops_penalty: f64,
@@ -48,7 +49,29 @@ impl Default for BeamOptions {
     }
 }
 
-fn score(res: &crate::planner::tree::TreeResult, ops_penalty: f64) -> f64 {
+/// 批量候选评估器（GPU 实现挂在这里；返回得分，越小越好）。
+pub trait BatchEvaluator {
+    /// 用基线方案初始化评估上下文（如构建评估子图、上传缓冲）。
+    /// 默认实现为空（无状态评估器可忽略）。
+    fn prepare(
+        &mut self,
+        _g: &KnowledgeGraph,
+        _an: &Analysis,
+        _target: MaterialId,
+        _rate_per_min: f64,
+        _choices: &HashMap<MaterialId, RecipeId>,
+    ) {
+    }
+
+    fn evaluate(&self, choices: &[HashMap<MaterialId, RecipeId>]) -> Vec<f64>;
+
+    /// 评估器名称（写入计划备注）
+    fn name(&self) -> String {
+        "batch".to_string()
+    }
+}
+
+fn score(res: &TreeResult, ops_penalty: f64) -> f64 {
     res.estimated_cost + ops_penalty * res.ops_total
 }
 
@@ -66,17 +89,17 @@ fn choices_hash(choices: &HashMap<MaterialId, RecipeId>) -> u64 {
     h
 }
 
-/// 材料 m 的替代配方（按单位成本升序，排除当前选择）。
-fn alternative_recipes(
+/// 材料 m 的替代配方（按单位成本升序；`current` 会被排除）。
+pub fn recipe_alternatives(
     g: &KnowledgeGraph,
     an: &Analysis,
     m: MaterialId,
-    current: RecipeId,
+    current: Option<RecipeId>,
     limit: usize,
 ) -> Vec<RecipeId> {
     let mut cands: Vec<(RecipeId, f64)> = Vec::new();
     for &rid in &g.producers[m as usize] {
-        if rid == current || !g.is_plannable(rid) {
+        if Some(rid) == current || !g.is_plannable(rid) {
             continue;
         }
         let r = g.recipe(rid);
@@ -101,40 +124,42 @@ fn alternative_recipes(
     cands.into_iter().map(|(rid, _)| rid).collect()
 }
 
-/// Beam Search 规划（贪心基线 + 配方分配局部搜索）。
-pub fn plan_beam(
+/// 材料 m 的替代配方（排除当前选择）。
+fn alternative_recipes(
     g: &KnowledgeGraph,
     an: &Analysis,
-    target: MaterialId,
-    rate_per_min: f64,
+    m: MaterialId,
+    current: RecipeId,
+    limit: usize,
+) -> Vec<RecipeId> {
+    recipe_alternatives(g, an, m, Some(current), limit)
+}
+
+/// 局部搜索状态。
+struct SearchState {
+    best: TreeResult,
+    best_score: f64,
+    frontier: Vec<HashMap<MaterialId, RecipeId>>,
+    seen: HashSet<u64>,
+    evals: usize,
+    rounds: usize,
+    improved: bool,
+}
+
+/// CPU 采样局部搜索（每轮采样若干材料扰动 + 完整展开评估）。
+fn cpu_local_search(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    req: &PlanRequest,
     opts: &BeamOptions,
-) -> Plan {
-    let t0 = Instant::now();
-    let req = PlanRequest {
-        target,
-        rate_per_min,
-        max_ops: 200_000,
-    };
-    let debug = std::env::var_os("GTP_BEAM_DEBUG").is_some();
-
-    // 基线：贪心展开
-    let empty: HashMap<MaterialId, RecipeId> = HashMap::new();
-    let mut best = expand_with_choices(g, an, &req, &empty);
-    let mut best_score = score(&best, opts.ops_penalty);
-    let mut frontier: Vec<HashMap<MaterialId, RecipeId>> = vec![best.choices.clone()];
-    let mut seen: HashSet<u64> = HashSet::new();
-    seen.insert(choices_hash(&best.choices));
-
-    let mut evals = 0usize;
-    let mut rounds = 0usize;
-    let mut improved = false;
-
+    mut st: SearchState,
+    debug: bool,
+) -> SearchState {
     for _round in 0..opts.max_iterations {
-        rounds += 1;
-        let mut cands: Vec<(f64, HashMap<MaterialId, RecipeId>, crate::planner::tree::TreeResult)> =
-            Vec::new();
+        st.rounds += 1;
+        let mut cands: Vec<(f64, HashMap<MaterialId, RecipeId>, TreeResult)> = Vec::new();
 
-        for choices in &frontier {
+        for choices in &st.frontier {
             let mut keys: Vec<MaterialId> = choices.keys().copied().collect();
             keys.sort_unstable();
             let step = (keys.len() / opts.sample_per_state.max(1)).max(1);
@@ -153,11 +178,11 @@ pub fn plan_beam(
                     let mut child = choices.clone();
                     child.insert(m, alt);
                     // 用完整展开评估；以实际生效的选择表作为规范状态
-                    let res = expand_with_choices(g, an, &req, &child);
-                    evals += 1;
+                    let res = expand_with_choices(g, an, req, &child);
+                    st.evals += 1;
                     let canonical = res.choices.clone();
                     let h = choices_hash(&canonical);
-                    if !seen.insert(h) {
+                    if !st.seen.insert(h) {
                         continue;
                     }
                     let sc = score(&res, opts.ops_penalty);
@@ -173,33 +198,179 @@ pub fn plan_beam(
 
         if debug {
             eprintln!(
-                "beam round {}: evals={} best_candidate={:.4} current_best={:.4}",
-                rounds, evals, cands[0].0, best_score
+                "beam(cpu) round {}: evals={} best_candidate={:.4} current_best={:.4}",
+                st.rounds, st.evals, cands[0].0, st.best_score
             );
         }
 
-        if cands[0].0 < best_score - 1e-9 {
-            // 采纳改进
+        if cands[0].0 < st.best_score - 1e-9 {
             let (sc, ch, res) = cands.remove(0);
-            best_score = sc;
-            best = res;
-            improved = true;
-            frontier.clear();
-            frontier.push(ch);
+            st.best_score = sc;
+            st.best = res;
+            st.improved = true;
+            st.frontier.clear();
+            st.frontier.push(ch);
             for (_, c, _) in cands.iter().take(opts.beam_width.saturating_sub(1)) {
-                frontier.push(c.clone());
+                st.frontier.push(c.clone());
             }
         } else {
             break; // 无改进，局部最优
         }
     }
+    st
+}
 
-    let mut notes = best.notes;
+/// Beam Search 规划（贪心基线 + 配方分配局部搜索，CPU 路径）。
+pub fn plan_beam(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    target: MaterialId,
+    rate_per_min: f64,
+    opts: &BeamOptions,
+) -> Plan {
+    plan_beam_with_evaluator(g, an, target, rate_per_min, opts, None)
+}
+
+/// 带批量评估器的 Beam：
+/// - 提供 `evaluator`（如 GPU）时：枚举全部单点扰动 → 批量粗筛 → CPU 精评 top-K，
+///   最后再跑 CPU 采样兜底；
+/// - 未提供时：仅 CPU 采样扰动 + 完整展开。
+pub fn plan_beam_with_evaluator(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    target: MaterialId,
+    rate_per_min: f64,
+    opts: &BeamOptions,
+    mut evaluator: Option<&mut dyn BatchEvaluator>,
+) -> Plan {
+    let t0 = Instant::now();
+    let req = PlanRequest {
+        target,
+        rate_per_min,
+        max_ops: 200_000,
+    };
+    let debug = std::env::var_os("GTP_BEAM_DEBUG").is_some();
+
+    // 基线：贪心展开
+    let empty: HashMap<MaterialId, RecipeId> = HashMap::new();
+    let baseline = expand_with_choices(g, an, &req, &empty);
+    let baseline_score = score(&baseline, opts.ops_penalty);
+    if let Some(ev) = evaluator.as_deref_mut() {
+        ev.prepare(g, an, target, rate_per_min, &baseline.choices);
+    }
+
+    let mut st = SearchState {
+        best: baseline,
+        best_score: baseline_score,
+        frontier: Vec::new(),
+        seen: HashSet::new(),
+        evals: 0,
+        rounds: 0,
+        improved: false,
+    };
+    st.frontier.push(st.best.choices.clone());
+    st.seen.insert(choices_hash(&st.best.choices));
+
+    let evaluator_name = evaluator.as_deref().map(|e| e.name()).unwrap_or_default();
+    let mut batch_evaluated = 0usize;
+
+    // ---- 批量评估路径（GPU 粗筛 + CPU 精评） ----
+    if let Some(ev) = evaluator.as_deref() {
+        for _round in 0..opts.max_iterations {
+            st.rounds += 1;
+            let mut cand_choices: Vec<HashMap<MaterialId, RecipeId>> = Vec::new();
+            for choices in &st.frontier {
+                let mut keys: Vec<MaterialId> = choices.keys().copied().collect();
+                keys.sort_unstable();
+                for m in keys {
+                    let Some(&cur) = choices.get(&m) else {
+                        continue;
+                    };
+                    for alt in alternative_recipes(g, an, m, cur, opts.candidate_limit) {
+                        let mut child = choices.clone();
+                        child.insert(m, alt);
+                        if st.seen.insert(choices_hash(&child)) {
+                            cand_choices.push(child);
+                        }
+                    }
+                }
+            }
+            if cand_choices.is_empty() {
+                break;
+            }
+            let scores = ev.evaluate(&cand_choices);
+            batch_evaluated += cand_choices.len();
+
+            // 取粗筛得分有限的前 K（K 取 beam_width 与 48 的较大值，提升精评覆盖）
+            let topk = opts.beam_width.max(48);
+            let mut idx: Vec<usize> = (0..cand_choices.len())
+                .filter(|&i| scores.get(i).map(|s| s.is_finite()).unwrap_or(false))
+                .collect();
+            idx.sort_by(|&a, &b| scores[a].total_cmp(&scores[b]));
+            idx.truncate(topk);
+            if idx.is_empty() {
+                break;
+            }
+
+            let mut round_best: Option<(f64, usize, TreeResult)> = None;
+            for &i in &idx {
+                let res = expand_with_choices(g, an, &req, &cand_choices[i]);
+                st.evals += 1;
+                let sc = score(&res, opts.ops_penalty);
+                if round_best.as_ref().map(|(s, _, _)| sc < *s).unwrap_or(true) {
+                    round_best = Some((sc, i, res));
+                }
+            }
+            let (sc, best_i, res) = round_best.expect("top-K 非空");
+
+            if debug {
+                eprintln!(
+                    "beam(batch) round {}: cands={} best={:.4} current={:.4}",
+                    st.rounds,
+                    cand_choices.len(),
+                    sc,
+                    st.best_score
+                );
+            }
+
+            if sc < st.best_score - 1e-9 {
+                st.best_score = sc;
+                st.best = res;
+                st.improved = true;
+                st.frontier.clear();
+                st.frontier.push(cand_choices[best_i].clone());
+                for &i in idx
+                    .iter()
+                    .filter(|&&i| i != best_i)
+                    .take(opts.beam_width.saturating_sub(1))
+                {
+                    st.frontier.push(cand_choices[i].clone());
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    // ---- CPU 采样兜底（保证不劣于纯 CPU 路径） ----
+    st = cpu_local_search(g, an, &req, opts, st, debug);
+
+    let mut notes = st.best.notes;
+    if evaluator.as_deref().is_some() {
+        notes.push(format!(
+            "批量评估器 {}：粗筛 {} 个候选，CPU 精评 {} 个",
+            evaluator_name, batch_evaluated, st.evals
+        ));
+    }
     notes.push(format!(
         "Beam 局部搜索：{} 轮，评估 {} 个候选{}",
-        rounds,
-        evals,
-        if improved { "" } else { "（贪心基线已是最优）" }
+        st.rounds,
+        st.evals,
+        if st.improved {
+            ""
+        } else {
+            "（贪心基线已是最优）"
+        }
     ));
     notes.push("JEI 数据不含配方时长与耗电：机器数量与 EU 消耗未计算".to_string());
 
@@ -209,9 +380,9 @@ pub fn plan_beam(
         target,
         rate_per_min,
         "beam",
-        &best.ops,
-        &best.raw,
-        &best.byproducts,
+        &st.best.ops,
+        &st.best.raw,
+        &st.best.byproducts,
         notes,
         t0.elapsed().as_secs_f64() * 1000.0,
     )
