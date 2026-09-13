@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, short, global = true)]
     data: Option<PathBuf>,
 
+    /// 名称 JSON 路径（默认：与配方同目录的 jei_names.json）
+    #[arg(long, global = true)]
+    names: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -101,6 +105,9 @@ enum Command {
         /// beam 模式：禁用 GPU 批量评估（强制 CPU 路径）
         #[arg(long)]
         no_gpu: bool,
+        /// 最大电压等级（等级名 LV/MV/HV/EV/IV/LuV/ZPM/UV/UHV… 或数字）
+        #[arg(long)]
+        max_tier: Option<String>,
         /// 展开每个配方的输入输出明细
         #[arg(long)]
         verbose: bool,
@@ -113,6 +120,26 @@ enum Command {
 fn resolve_data(arg: Option<PathBuf>) -> PathBuf {
     arg.or_else(|| std::env::var_os("GTP_DATA").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("jei_recipes.json"))
+}
+
+/// 名称文件解析：显式参数 > 环境变量 > 与配方同目录的 jei_names.json。
+fn resolve_names(data: &PathBuf, arg: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = arg {
+        return p.exists().then_some(p);
+    }
+    if let Some(p) = std::env::var_os("GTP_NAMES").map(PathBuf::from) {
+        return p.exists().then_some(p);
+    }
+    let sibling = data.with_file_name("jei_names.json");
+    sibling.exists().then_some(sibling)
+}
+
+/// 解析 --max-tier（等级名或数字）。
+fn parse_max_tier(s: &str) -> Option<u8> {
+    if let Ok(n) = s.trim().parse::<u8>() {
+        return Some(n);
+    }
+    gt_planner_core::util::tier_index_from_name(s)
 }
 
 /// 千分位格式化。
@@ -151,7 +178,7 @@ fn kind_from_str(s: &str) -> Option<MaterialKind> {
     }
 }
 
-fn load(data: &PathBuf) -> Result<KnowledgeGraph, Box<dyn std::error::Error>> {
+fn load(data: &PathBuf, names: Option<&PathBuf>) -> Result<KnowledgeGraph, Box<dyn std::error::Error>> {
     if !data.exists() {
         return Err(format!(
             "找不到数据文件：{}\n提示：用 --data <路径> 指定，或设置环境变量 GTP_DATA",
@@ -162,8 +189,18 @@ fn load(data: &PathBuf) -> Result<KnowledgeGraph, Box<dyn std::error::Error>> {
     let size_mb = std::fs::metadata(data)?.len() as f64 / 1_048_576.0;
     eprintln!("读取 {} ({:.1} MB) ...", data.display(), size_mb);
     let t0 = Instant::now();
-    let g = gt_planner_core::parser::load_file(data)?;
-    eprintln!("解析 + 构图完成，用时 {:.2}s", t0.elapsed().as_secs_f64());
+    let g = match names {
+        Some(np) => {
+            eprintln!("读取名称库 {} ...", np.display());
+            gt_planner_core::parser::load_with_names(data, np)?
+        }
+        None => gt_planner_core::parser::load_file(data)?,
+    };
+    eprintln!(
+        "解析 + 构图完成，用时 {:.2}s（名称 {} 条）",
+        t0.elapsed().as_secs_f64(),
+        g.names.len()
+    );
     Ok(g)
 }
 
@@ -301,13 +338,20 @@ fn cmd_find(g: &KnowledgeGraph, query: &str, limit: usize, kind: Option<&str>) {
         let kind_s = g.kind_str(info.key.kind);
         let full = g.material_id_str(id);
         let nbt_mark = if info.key.nbt.is_some() { " [NBT]" } else { "" };
+        let zh = g.names.zh_or(full, &info.display);
+        let en = g.names.en_or(full, &info.display);
+        let name = if zh == en {
+            zh.to_string()
+        } else {
+            format!("{} / {}", zh, en)
+        };
         println!(
             "{:<8} {:<45} {:>6} {:>6}  {}{}",
             kind_s,
             full,
             g.producers[id as usize].len(),
             g.consumers[id as usize].len(),
-            info.display,
+            name,
             nbt_mark
         );
     }
@@ -328,7 +372,14 @@ fn cmd_info(g: &KnowledgeGraph, an: &Analysis, m: MaterialId, limit: usize) {
         g.material_id_str(m),
         g.kind_str(info.key.kind)
     );
-    println!("名称            {}", info.display);
+    let full = g.material_id_str(m);
+    let zh = g.names.zh_or(full, &info.display);
+    let en = g.names.en_or(full, &info.display);
+    if zh == en {
+        println!("名称            {}", zh);
+    } else {
+        println!("名称            {} / {}", zh, en);
+    }
     let c = an.cost.unit_cost[m as usize];
     if c.is_finite() {
         println!("成本估计        {:.4} 原始物品当量/单位", c);
@@ -440,11 +491,13 @@ fn cmd_info(g: &KnowledgeGraph, an: &Analysis, m: MaterialId, limit: usize) {
 
 fn cmd_recipes(g: &KnowledgeGraph, m: MaterialId, limit: usize) {
     let info = g.material(m);
+    let full = g.material_id_str(m);
     println!(
-        "材料 {} ({})，名称 {}",
-        g.material_id_str(m),
+        "材料 {} ({})，名称 {} / {}",
+        full,
         g.kind_str(info.key.kind),
-        info.display
+        g.names.zh_or(full, &info.display),
+        g.names.en_or(full, &info.display)
     );
     println!();
     println!("== 生产配方 ({}) ==", g.producers[m as usize].len());
@@ -483,6 +536,7 @@ fn cmd_plan(
     include_recycling: bool,
     block_amplification: bool,
     no_gpu: bool,
+    max_tier: Option<u8>,
     verbose: bool,
     json_out: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -492,6 +546,7 @@ fn cmd_plan(
                 target: m,
                 rate_per_min: rate,
                 max_ops,
+                max_tier,
             };
             plan_tree(g, an, &req)
         }
@@ -502,6 +557,7 @@ fn cmd_plan(
                 max_iterations,
                 sample_per_state: 24,
                 ops_penalty: 0.001,
+                max_tier,
             };
             // GPU 批量评估（不可用则自动回退 CPU）
             let mut evaluator = if no_gpu {
@@ -529,6 +585,7 @@ fn cmd_plan(
             let opts = gt_planner_core::solver::ExactOptions {
                 include_recycling,
                 block_amplification,
+                max_tier,
                 ..Default::default()
             };
             gt_planner_core::solver::plan_exact(g, an, m, rate, &opts)
@@ -542,7 +599,7 @@ fn cmd_plan(
     println!("== 生产计划 ==");
     println!(
         "目标        {} ({}) x {}/min",
-        plan.target.display,
+        plan.target.display_zh,
         plan.target.id,
         fmt_rate(plan.rate_per_min)
     );
@@ -553,6 +610,16 @@ fn cmd_plan(
         fmt_rate(plan.totals.recipe_ops_per_min),
         fmt_rate(plan.totals.estimated_cost)
     );
+    if plan.totals.total_machines > 0.0 {
+        println!(
+            "机器总数    {:.1} 台 | 耗电 {}/t | 发电 {}/t | 净功率 {}/t | 净能量 {}/min",
+            plan.totals.total_machines,
+            fmt_rate(plan.totals.consume_eu_t),
+            fmt_rate(plan.totals.generate_eu_t),
+            fmt_rate(plan.totals.net_eu_t),
+            fmt_rate(plan.totals.net_eu_per_min)
+        );
+    }
     if plan.totals.raw_fluids_mb_per_min > 0.0 {
         println!(
             "原料汇总    物品 {}/min + 流体 {}/min(mB)",
@@ -564,11 +631,19 @@ fn cmd_plan(
     println!();
     println!("-- 配方步骤（按操作量降序）--");
     for p in &plan.recipes {
+        let extra = match (p.machine_count, p.eut, p.tier.as_deref()) {
+            (Some(mc), Some(eu), Some(t)) => {
+                format!("  |  {:.2} 台  {:.0} EU/t  [{}]", mc, eu, t)
+            }
+            (Some(mc), _, _) => format!("  |  {:.2} 台", mc),
+            _ => String::new(),
+        };
         println!(
-            "  {:>10} op/min  [{}] {}",
+            "  {:>10} op/min  [{}] {}{}",
             fmt_rate(p.ops_per_min),
             p.category_title,
-            p.recipe
+            p.recipe,
+            extra
         );
         if verbose {
             for e in &p.inputs {
@@ -634,13 +709,15 @@ fn cmd_plan(
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let data = resolve_data(cli.data.clone());
+    let names = resolve_names(&data, cli.names.clone());
     match &cli.command {
         Command::Stats { top } => {
-            let g = load(&resolve_data(cli.data))?;
+            let g = load(&data, names.as_ref())?;
             cmd_stats(&g, *top);
         }
         Command::Find { query, limit, kind } => {
-            let g = load(&resolve_data(cli.data))?;
+            let g = load(&data, names.as_ref())?;
             cmd_find(&g, query, *limit, kind.as_deref());
         }
         Command::Info {
@@ -649,7 +726,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             limit,
         } => {
-            let g = load(&resolve_data(cli.data))?;
+            let g = load(&data, names.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -665,7 +742,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             nbt,
             limit,
         } => {
-            let g = load(&resolve_data(cli.data))?;
+            let g = load(&data, names.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -687,10 +764,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             include_recycling,
             block_amplification,
             no_gpu,
+            max_tier,
             verbose,
             json,
         } => {
-            let g = load(&resolve_data(cli.data))?;
+            let g = load(&data, names.as_ref())?;
             let m = resolve_material(
                 &g,
                 material,
@@ -698,6 +776,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 nbt.as_deref(),
             )?;
             let an = build_analysis(&g);
+            let mt = max_tier.as_deref().and_then(parse_max_tier);
+            if max_tier.is_some() && mt.is_none() {
+                eprintln!("警告：无法识别的 --max-tier（等级名或数字），忽略");
+            }
             cmd_plan(
                 &g,
                 &an,
@@ -711,6 +793,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 *include_recycling,
                 *block_amplification,
                 *no_gpu,
+                mt,
                 *verbose,
                 json.as_ref(),
             )?;

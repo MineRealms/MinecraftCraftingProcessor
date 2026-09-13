@@ -43,6 +43,8 @@ pub struct ExactOptions {
     pub max_recipes: usize,
     /// 操作量罚项
     pub ops_penalty: f64,
+    /// 最大电压等级（None = 不限制）
+    pub max_tier: Option<u8>,
 }
 
 impl Default for ExactOptions {
@@ -53,6 +55,7 @@ impl Default for ExactOptions {
             max_materials: 2000,
             max_recipes: 12000,
             ops_penalty: 1e-6,
+            max_tier: None,
         }
     }
 }
@@ -115,6 +118,9 @@ pub fn plan_exact(
             }
             if !opts.include_recycling && g.is_recycling(rid) {
                 skipped_recycling += 1;
+                continue;
+            }
+            if !crate::util::tier_allowed(g, rid, opts.max_tier) {
                 continue;
             }
             if rec_index.contains_key(&rid) {

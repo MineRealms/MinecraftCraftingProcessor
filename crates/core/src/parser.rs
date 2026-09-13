@@ -15,20 +15,28 @@ use crate::error::Result;
 use crate::graph::{DatasetMeta, GraphStats, KnowledgeGraph};
 use crate::intern::Interner;
 use crate::model::{
-    Catalyst, CategoryId, CategoryInfo, MaterialId, MaterialInfo, MaterialKey, MaterialKind,
-    RecipeId, RecipeNode, Slot,
+    Catalyst, CategoryId, CategoryInfo, EnergyIo, GtRecipeInfo, MaterialId, MaterialInfo,
+    MaterialKey, MaterialKind, RecipeId, RecipeNode, Slot,
 };
-use crate::raw::{RawCategory, RawIngredient, RawRecipe, RawRoot, RawSlot};
+use crate::names::NameStore;
+use crate::raw::{RawCategory, RawGt, RawIngredient, RawRecipe, RawRoot, RawSlot};
 
-/// 从文件加载并构建知识图谱。
+/// 从文件加载并构建知识图谱（不含名称库）。
 ///
-/// 注意：当前为一次性全量解析（54MB 紧凑 JSON 实测可行），
+/// 注意：当前为一次性全量解析（57MB 紧凑 JSON 实测可行），
 /// 后续可替换为流式 Visitor 或 bincode 缓存。
 pub fn load_file(path: &Path) -> Result<KnowledgeGraph> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
     let root: RawRoot = serde_json::from_reader(reader)?;
     build_from_root(root)
+}
+
+/// 从文件加载并附加名称库（jei_names.json）。
+pub fn load_with_names(recipes: &Path, names: &Path) -> Result<KnowledgeGraph> {
+    let mut g = load_file(recipes)?;
+    g.names = NameStore::load(names)?;
+    Ok(g)
 }
 
 /// 从字符串加载（测试用）。
@@ -58,6 +66,35 @@ pub fn build_from_root(root: RawRoot) -> Result<KnowledgeGraph> {
 /// NBT 空串归一为 None。
 fn norm_nbt(nbt: Option<&str>) -> Option<&str> {
     nbt.filter(|s| !s.is_empty())
+}
+
+/// 解析 GT 需求块。
+fn parse_gt(raw: &Option<RawGt>) -> Option<GtRecipeInfo> {
+    let r = raw.as_ref()?;
+    let energy_io = match r.energy_io.as_deref() {
+        Some("in") => Some(EnergyIo::In),
+        Some("out") => Some(EnergyIo::Out),
+        _ => None,
+    };
+    let eut = r.eut.unwrap_or(0.0);
+    let amperage = r.amperage.unwrap_or(1.0);
+    let total_eu_t = r.total_eu_t.unwrap_or(eut * amperage);
+    let total_eu = r
+        .total_eu
+        .unwrap_or(total_eu_t * r.duration as f64);
+    Some(GtRecipeInfo {
+        recipe_type: r.recipe_type.clone(),
+        duration_ticks: r.duration,
+        parallels: r.parallels.max(1),
+        eut,
+        amperage,
+        energy_io,
+        tier: r.tier.clone(),
+        tier_index: r.tier_index,
+        voltage: r.voltage.unwrap_or(0.0),
+        total_eu_t,
+        total_eu,
+    })
 }
 
 /// 材料可读名：短 id，下划线转空格；含 NBT 追加标记。
@@ -241,6 +278,7 @@ impl Builder {
             id: id.clone(),
             inputs,
             outputs,
+            gt: parse_gt(&raw.gt),
         });
         self.recipe_index.insert((cid, id), rid);
         rid
@@ -301,6 +339,7 @@ impl Builder {
             consumers: self.consumers,
             plannable,
             harvestable,
+            names: NameStore::default(),
             meta: self.meta,
             stats,
         }

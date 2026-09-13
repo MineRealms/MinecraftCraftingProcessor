@@ -9,6 +9,7 @@ use crate::model::{
     CategoryId, CategoryInfo, IngredientDto, MaterialDto, MaterialId, MaterialInfo, MaterialKey,
     MaterialKind, RecipeId, RecipeNode, Slot, SlotDto,
 };
+use crate::names::NameStore;
 
 /// 数据集元信息（来自 JSON 头部）。
 #[derive(Debug, Clone, Default, Serialize)]
@@ -66,6 +67,8 @@ pub struct KnowledgeGraph {
     pub plannable: Vec<bool>,
     /// 材料是否可"采集"（存在无输入的可规划配方，如空气/水收集）。
     pub harvestable: Vec<bool>,
+    /// 名称库（jei_names.json；可为空）。
+    pub names: NameStore,
     pub meta: DatasetMeta,
     pub stats: GraphStats,
 }
@@ -184,11 +187,14 @@ impl KnowledgeGraph {
 
     pub fn material_dto(&self, id: MaterialId) -> MaterialDto {
         let info = self.material(id);
+        let full = self.strings.get(info.key.id);
         MaterialDto {
             kind: self.kind_str(info.key.kind).to_string(),
-            id: self.strings.get(info.key.id).to_string(),
+            id: full.to_string(),
             nbt: info.key.nbt.map(|n| self.strings.get(n).to_string()),
             display: info.display.clone(),
+            display_zh: self.names.zh_or(full, &info.display).to_string(),
+            display_en: self.names.en_or(full, &info.display).to_string(),
         }
     }
 

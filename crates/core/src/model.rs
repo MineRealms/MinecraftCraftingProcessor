@@ -63,6 +63,50 @@ pub struct RecipeNode {
     pub id: String,
     pub inputs: Vec<Slot>,
     pub outputs: Vec<Slot>,
+    /// GT 配方数据（仅 GT 配方有；原版合成等为 None）。
+    pub gt: Option<GtRecipeInfo>,
+}
+
+/// 能量方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnergyIo {
+    /// 耗电
+    In,
+    /// 发电
+    Out,
+}
+
+/// GT 配方需求块（GTCEu API 导出）。
+#[derive(Debug, Clone)]
+pub struct GtRecipeInfo {
+    pub recipe_type: Option<String>,
+    /// 配方时长（tick，20 = 1 秒）
+    pub duration_ticks: u32,
+    pub parallels: u32,
+    /// EU/t（每 tick 能量）
+    pub eut: f64,
+    pub amperage: f64,
+    pub energy_io: Option<EnergyIo>,
+    /// 等级名（LV/MV/…）
+    pub tier: Option<String>,
+    /// 等级序号（便于数值比较）
+    pub tier_index: Option<u8>,
+    /// 最低电压
+    pub voltage: f64,
+    /// eut × A
+    pub total_eu_t: f64,
+    /// total_eu_t × duration
+    pub total_eu: f64,
+}
+
+impl GtRecipeInfo {
+    /// 是否消耗能量（燃料类配方无能量字段）。
+    pub fn consumes_energy(&self) -> bool {
+        self.energy_io == Some(EnergyIo::In)
+    }
+    pub fn generates_energy(&self) -> bool {
+        self.energy_io == Some(EnergyIo::Out)
+    }
 }
 
 impl RecipeNode {
@@ -103,7 +147,12 @@ pub struct MaterialDto {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nbt: Option<String>,
+    /// 回退名（短 id）
     pub display: String,
+    /// 中文名（来自 jei_names.json；缺失回退 display）
+    pub display_zh: String,
+    /// 英文名（来自 jei_names.json；缺失回退 display）
+    pub display_en: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

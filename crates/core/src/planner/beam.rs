@@ -35,6 +35,8 @@ pub struct BeamOptions {
     pub sample_per_state: usize,
     /// 操作量罚项（每 op 的原料当量代价）。
     pub ops_penalty: f64,
+    /// 最大电压等级（None = 不限制）。
+    pub max_tier: Option<u8>,
 }
 
 impl Default for BeamOptions {
@@ -45,6 +47,7 @@ impl Default for BeamOptions {
             max_iterations: 12,
             sample_per_state: 24,
             ops_penalty: 0.001,
+            max_tier: None,
         }
     }
 }
@@ -96,10 +99,12 @@ pub fn recipe_alternatives(
     m: MaterialId,
     current: Option<RecipeId>,
     limit: usize,
+    max_tier: Option<u8>,
 ) -> Vec<RecipeId> {
     let mut cands: Vec<(RecipeId, f64)> = Vec::new();
     for &rid in &g.producers[m as usize] {
-        if Some(rid) == current || !g.is_plannable(rid) {
+        if Some(rid) == current || !g.is_plannable(rid) || !crate::util::tier_allowed(g, rid, max_tier)
+        {
             continue;
         }
         let r = g.recipe(rid);
@@ -131,8 +136,9 @@ fn alternative_recipes(
     m: MaterialId,
     current: RecipeId,
     limit: usize,
+    max_tier: Option<u8>,
 ) -> Vec<RecipeId> {
-    recipe_alternatives(g, an, m, Some(current), limit)
+    recipe_alternatives(g, an, m, Some(current), limit, max_tier)
 }
 
 /// 局部搜索状态。
@@ -174,7 +180,8 @@ fn cpu_local_search(
                 let Some(&cur) = choices.get(&m) else {
                     continue;
                 };
-                for alt in alternative_recipes(g, an, m, cur, opts.candidate_limit) {
+                    for alt in alternative_recipes(g, an, m, cur, opts.candidate_limit, opts.max_tier)
+                    {
                     let mut child = choices.clone();
                     child.insert(m, alt);
                     // 用完整展开评估；以实际生效的选择表作为规范状态
@@ -248,6 +255,7 @@ pub fn plan_beam_with_evaluator(
         target,
         rate_per_min,
         max_ops: 200_000,
+        max_tier: opts.max_tier,
     };
     let debug = std::env::var_os("GTP_BEAM_DEBUG").is_some();
 
@@ -286,7 +294,7 @@ pub fn plan_beam_with_evaluator(
                     let Some(&cur) = choices.get(&m) else {
                         continue;
                     };
-                    for alt in alternative_recipes(g, an, m, cur, opts.candidate_limit) {
+                for alt in alternative_recipes(g, an, m, cur, opts.candidate_limit, opts.max_tier) {
                         let mut child = choices.clone();
                         child.insert(m, alt);
                         if st.seen.insert(choices_hash(&child)) {

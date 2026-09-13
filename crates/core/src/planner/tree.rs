@@ -28,6 +28,8 @@ pub struct PlanRequest {
     pub rate_per_min: f64,
     /// 展开操作上限（防循环失控）。
     pub max_ops: usize,
+    /// 最大电压等级（None = 不限制）。
+    pub max_tier: Option<u8>,
 }
 
 impl PlanRequest {
@@ -36,8 +38,49 @@ impl PlanRequest {
             target,
             rate_per_min,
             max_ops: 200_000,
+            max_tier: None,
         }
     }
+}
+
+/// 选配方：优先成本库的 best_recipe；若超出电压等级则找等级内最便宜的。
+fn pick_best_recipe(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    m: MaterialId,
+    max_tier: Option<u8>,
+) -> Option<RecipeId> {
+    if let Some(best) = an.cost.best_recipe[m as usize] {
+        if crate::util::tier_allowed(g, best, max_tier) {
+            return Some(best);
+        }
+    }
+    let mut best: Option<(f64, RecipeId)> = None;
+    for &rid in &g.producers[m as usize] {
+        if !g.is_plannable(rid) || !crate::util::tier_allowed(g, rid, max_tier) {
+            continue;
+        }
+        let r = g.recipe(rid);
+        if r.inputs.is_empty() {
+            continue;
+        }
+        let Some(oq) = output_qty_of(r, m) else {
+            continue;
+        };
+        let rc = crate::util::recipe_cost(g, &an.cost.unit_cost, Some(&an.cost.cyclic), r);
+        if !rc.is_finite() {
+            continue;
+        }
+        let nq = mat_norm_qty(g, m, oq);
+        if nq <= 0.0 {
+            continue;
+        }
+        let per = rc / nq;
+        if best.as_ref().map(|(b, _)| per < *b).unwrap_or(true) {
+            best = Some((per, rid));
+        }
+    }
+    best.map(|(_, r)| r)
 }
 
 /// 展开结果（未组装 Plan）。
@@ -153,7 +196,7 @@ pub(crate) fn expand_tree(
         // 无可达生产路线（可采集资源 / 纯循环不可达）→ 按外部输入处理。
         let rid = match chosen[m as usize] {
             Some(r) => r,
-            None => match an.cost.best_recipe[m as usize] {
+            None => match pick_best_recipe(g, an, m, req.max_tier) {
                 Some(r) => {
                     chosen[m as usize] = Some(r);
                     r

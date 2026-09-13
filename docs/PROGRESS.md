@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M5 GPU 批量评估 + 图谱优化 + exact LP`
+- 最新提交：`M7 GT 数据 + 中英文 + tier 过滤`
 - 编译状态：✅ `cargo build --workspace` + `cargo test`（13 个单测全过）
-- 真实数据验证：✅ 解析 ~1.6s；分析 ~0.3s；tree ~1ms；beam(CPU) ~1.1s；beam(GPU) ~1.4s；exact ~0.7s
-- QP 60/min 成本对比：tree 66.1 → beam(CPU) 30.6 → **beam(GPU) 29.3**；exact LP 目标值 38.99（Optimal，物料平衡模型）
+- 真实数据验证：✅ 57MB JSON 解析 ~1.5s（含 12,953 条名称）；分析 ~0.3s
+- QP 60/min：tree 66.1（279 台机器 / 净 -703 EU/t 发电）→ beam(GPU) 29.3 → exact LP 目标值 38.99
 
 ## 里程碑看板
 
@@ -72,6 +72,17 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M7 GT 数据 + 中英文 + tier 过滤 ✅（2026-09-13 追加）
+- [x] 解析 `gt` 需求块：duration / eut / amperage / energy_io / tier / tier_index / total_eu
+- [x] 解析 `jei_names.json`（12,953 条：machines/materials/blocks/items/fluids 中英文 + 机器 tier）
+- [x] Plan IR：每步机器数（ops × duration / 1200）、EU/t、等级、EU/min；汇总机器总数/净功率/耗能/发电
+- [x] 电压等级过滤：`--max-tier LV` / API `max_tier` / 前端下拉（超等级的配方不可用）
+- [x] CLI/API 全链路中英文（MaterialDto: display_zh / display_en）
+- [x] 前端：中英切换（默认中文，localStorage 记忆）；大图（>400 节点）自动不渲染名称；计划表新增机器数/EU/tier 列
+- [x] 数据说明：燃料类配方（269 条）无能量字段；概率产出 JEI 不暴露
+
+**实测**：QP 60/min tree = 119 配方 / 279 台机器 / 净功率 -703 EU/t（等离子发电）；`--max-tier LV` 时无法生产（正确降级为外部输入）。
 
 ### M5 GPU（wgpu） ✅
 - [x] 新 crate `crates/gpu`：wgpu 27 计算管线（RTX 4060 实测；无 GPU 时软件回退/CPU 回退）

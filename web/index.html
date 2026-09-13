@@ -10,6 +10,7 @@
   <header>
     <div class="brand">GT&nbsp;Planner <span>GregTech 工业生产规划器</span></div>
     <div id="stats-chips" class="chips"></div>
+    <button id="lang-toggle" class="ghost lang-toggle" title="切换中英文">EN</button>
   </header>
 
   <nav class="tabs">
@@ -46,6 +47,19 @@
           <option value="tree">tree · 快速贪心</option>
           <option value="beam">beam · 局部搜索（推荐）</option>
           <option value="exact">exact · LP 精确</option>
+        </select>
+        <select id="plan-tier" title="最大电压等级">
+          <option value="">不限等级</option>
+          <option value="ULV">≤ ULV</option>
+          <option value="LV">≤ LV</option>
+          <option value="MV">≤ MV</option>
+          <option value="HV">≤ HV</option>
+          <option value="EV">≤ EV</option>
+          <option value="IV">≤ IV</option>
+          <option value="LuV">≤ LuV</option>
+          <option value="ZPM">≤ ZPM</option>
+          <option value="UV">≤ UV</option>
+          <option value="UHV">≤ UHV</option>
         </select>
         <button id="plan-btn">生成计划</button>
       </div>

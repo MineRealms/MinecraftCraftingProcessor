@@ -33,6 +33,7 @@ header {
 }
 .brand { font-size: 18px; font-weight: 700; letter-spacing: .3px; }
 .brand span { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+.lang-toggle { margin-left: auto; min-width: 56px; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
 .chip {
   background: var(--panel-2);

@@ -59,6 +59,37 @@ pub struct RawRecipe {
     pub inputs: Vec<RawSlot>,
     #[serde(default)]
     pub outputs: Vec<RawSlot>,
+    #[serde(default)]
+    pub gt: Option<RawGt>,
+}
+
+/// GT 配方需求块（GTCEu API 导出）。
+#[derive(Debug, Deserialize)]
+pub struct RawGt {
+    #[serde(default)]
+    pub recipe_type: Option<String>,
+    #[serde(default)]
+    pub duration: u32,
+    #[serde(default)]
+    pub parallels: u32,
+    #[serde(default)]
+    pub oc_level: u32,
+    #[serde(default)]
+    pub eut: Option<f64>,
+    #[serde(default)]
+    pub amperage: Option<f64>,
+    #[serde(default)]
+    pub energy_io: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub tier_index: Option<u8>,
+    #[serde(default)]
+    pub voltage: Option<f64>,
+    #[serde(default)]
+    pub total_eu_t: Option<f64>,
+    #[serde(default)]
+    pub total_eu: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

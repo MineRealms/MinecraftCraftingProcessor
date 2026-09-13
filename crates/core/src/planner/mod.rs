@@ -41,12 +41,42 @@ pub(crate) fn assemble_plan(
     elapsed_ms: f64,
 ) -> Plan {
     let mut planned: Vec<PlannedRecipe> = Vec::new();
+    let mut total_machines = 0.0f64;
+    let mut consume_eu_t = 0.0f64;
+    let mut generate_eu_t = 0.0f64;
+    let mut net_eu_per_min = 0.0f64;
     for &(rid, op) in ops {
         if op <= EPS {
             continue;
         }
         let r = g.recipe(rid);
         let cat = g.category(r.category);
+        // GT 数据：机器数 / EU
+        let (machine_count, eut, tier, eu_per_min) = match &r.gt {
+            Some(gt) => {
+                let machines = if gt.duration_ticks > 0 {
+                    op * gt.duration_ticks as f64 / 1200.0
+                } else {
+                    0.0
+                };
+                if gt.consumes_energy() {
+                    total_machines += machines;
+                    consume_eu_t += machines * gt.total_eu_t;
+                    net_eu_per_min += op * gt.total_eu;
+                } else if gt.generates_energy() {
+                    total_machines += machines;
+                    generate_eu_t += machines * gt.total_eu_t;
+                    net_eu_per_min -= op * gt.total_eu;
+                }
+                (
+                    Some(machines),
+                    Some(gt.total_eu_t),
+                    gt.tier.clone(),
+                    Some(op * gt.total_eu),
+                )
+            }
+            None => (None, None, None, None),
+        };
         let mut inputs = Vec::new();
         for slot in &r.inputs {
             let Some((am, aq)) = cheapest_alt(g, &an.cost.unit_cost, Some(&an.cost.cyclic), slot)
@@ -73,7 +103,10 @@ pub(crate) fn assemble_plan(
             category: cat.ty.clone(),
             category_title: cat.title.clone(),
             ops_per_min: op,
-            machine_count: None,
+            machine_count,
+            eut,
+            tier,
+            eu_per_min,
             inputs,
             outputs,
         });
@@ -131,6 +164,11 @@ pub(crate) fn assemble_plan(
         raw_items_per_min: raw_items,
         raw_fluids_mb_per_min: raw_fluids,
         estimated_cost,
+        total_machines,
+        net_eu_t: consume_eu_t - generate_eu_t,
+        consume_eu_t,
+        generate_eu_t,
+        net_eu_per_min,
     };
 
     Plan {

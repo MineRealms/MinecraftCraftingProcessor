@@ -31,6 +31,28 @@ const kindClass = (k) => (k === "fluid" ? "kind-fluid" : "kind-item");
 const kindName = (k) => (k === "fluid" ? "流体" : k === "item" ? "物品" : k);
 
 // ---------------------------------------------------------------------------
+// Language (默认中文；localStorage 记忆)
+// ---------------------------------------------------------------------------
+let lang = localStorage.getItem("gtp-lang") || "zh";
+let lastPlan = null;
+let lastSearchQuery = "";
+const nm = (m) => (lang === "zh" ? m.display_zh || m.display : m.display_en || m.display);
+function setLang(l, rerender = true) {
+  lang = l;
+  localStorage.setItem("gtp-lang", l);
+  document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
+  $("#lang-toggle").textContent = l === "zh" ? "EN" : "中文";
+  if (rerender) {
+    if (lastGraph) applyGraphView();
+    const mid = $("#material-content")?.dataset.matid;
+    if (mid) showMaterial(mid, $("#material-content").dataset.matkind || null, $("#material-content").dataset.matnbt || null);
+    if (lastPlan) $("#plan-result").innerHTML = renderPlan(lastPlan);
+    if (lastSearchQuery) doSearch();
+  }
+}
+$("#lang-toggle").addEventListener("click", () => setLang(lang === "zh" ? "en" : "zh"));
+
+// ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
 function switchTab(name) {
@@ -67,6 +89,7 @@ async function loadStats() {
 async function doSearch() {
   const q = $("#search-input").value.trim();
   if (!q) return;
+  lastSearchQuery = q;
   const kind = $("#search-kind").value;
   const box = $("#search-results");
   box.innerHTML = `<div class="placeholder">搜索中…</div>`;
@@ -81,7 +104,7 @@ async function doSearch() {
       return `<tr class="clickable" data-id="${esc(m.id)}" data-kind="${esc(m.kind)}" data-nbt="${esc(m.nbt || "")}">
         <td class="mono ${kindClass(m.kind)}">${esc(m.id)}</td>
         <td>${kindName(m.kind)}${m.nbt ? ' <span class="tag warn">NBT</span>' : ""}</td>
-        <td>${esc(m.display)}</td>
+        <td>${esc(nm(m))}</td>
         <td class="muted">${r.producers}</td>
         <td class="muted">${r.consumers}</td>
         <td class="mono">${r.unit_cost === null ? "-" : fmt(r.unit_cost, 3)}</td>
@@ -132,6 +155,9 @@ function recipeCard(r) {
 
 async function showMaterial(id, kind, nbt) {
   const box = $("#material-content");
+  box.dataset.matid = id;
+  box.dataset.matkind = kind || "";
+  box.dataset.matnbt = nbt || "";
   box.innerHTML = `<div class="placeholder">加载 ${esc(id)} …</div>`;
   try {
     const qs = new URLSearchParams();
@@ -140,6 +166,7 @@ async function showMaterial(id, kind, nbt) {
     qs.set("limit", "80");
     const d = await api(`/api/material/${encodeURIComponent(id)}?${qs}`);
     const m = d.material;
+    const otherName = lang === "zh" ? m.display_en : m.display_zh;
     const tags = [
       `<span class="tag">${kindName(m.kind)}</span>`,
       m.nbt ? `<span class="tag warn">NBT</span>` : "",
@@ -150,7 +177,7 @@ async function showMaterial(id, kind, nbt) {
     ].join(" ");
     box.innerHTML = `
       <h2 class="mono ${kindClass(m.kind)}">${esc(m.id)}</h2>
-      <div>${esc(m.display)} ${tags}</div>
+      <div><b>${esc(nm(m))}</b>${otherName && otherName !== nm(m) ? ` <span class="muted">/ ${esc(otherName)}</span>` : ""} ${tags}</div>
       <div style="margin:10px 0">
         <button id="mat-plan">规划这个材料</button>
         <button class="ghost" id="mat-graph">查看图谱</button>
@@ -183,7 +210,7 @@ async function showMaterial(id, kind, nbt) {
 // Planner
 // ---------------------------------------------------------------------------
 function planEntryHtml(e) {
-  return `<span class="alt mono ${kindClass(e.material.kind)}">${esc(e.material.id)} ×${fmt(e.rate_per_min)}/min</span>`;
+  return `<span class="alt mono ${kindClass(e.material.kind)}">${esc(nm(e.material))} ×${fmt(e.rate_per_min)}/min</span>`;
 }
 
 function renderPlan(p) {
@@ -193,6 +220,10 @@ function renderPlan(p) {
     ["估算成本", fmt(p.totals.estimated_cost)],
     ["原料物品 /min", fmt(p.totals.raw_items_per_min)],
     ["原料流体 mB/min", fmt(p.totals.raw_fluids_mb_per_min)],
+    ["机器总数", p.totals.total_machines ? fmt(p.totals.total_machines, 1) : "-"],
+    ["净功率 EU/t", p.totals.total_machines ? fmt(p.totals.net_eu_t, 0) : "-"],
+    ["耗电 EU/t", p.totals.total_machines ? fmt(p.totals.consume_eu_t, 0) : "-"],
+    ["发电 EU/t", p.totals.total_machines ? fmt(p.totals.generate_eu_t, 0) : "-"],
     ["耗时 ms", fmt(p.elapsed_ms, 1)],
   ].map(([k, v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
 
@@ -201,22 +232,25 @@ function renderPlan(p) {
       <td class="mono">${fmt(r.ops_per_min)}</td>
       <td>${esc(r.category_title)}</td>
       <td class="mono">${esc(r.recipe)}</td>
+      <td class="mono">${r.machine_count != null ? fmt(r.machine_count, 2) : "-"}</td>
+      <td class="mono">${r.eut != null ? fmt(r.eut, 0) : "-"}</td>
+      <td>${r.tier ? `<span class="tag">${esc(r.tier)}</span>` : "-"}</td>
       <td>${r.inputs.map(planEntryHtml).join("<br>")}</td>
       <td>${r.outputs.map(planEntryHtml).join("<br>")}</td>
     </tr>`).join("");
 
   const raw = p.raw_materials.map((e) =>
-    `<tr><td class="mono ${kindClass(e.material.kind)}">${esc(e.material.id)}</td><td>${kindName(e.material.kind)}</td><td class="mono">${fmt(e.rate_per_min)}</td></tr>`).join("");
+    `<tr><td class="mono ${kindClass(e.material.kind)}">${esc(nm(e.material))}</td><td>${kindName(e.material.kind)}</td><td class="mono">${fmt(e.rate_per_min)}</td></tr>`).join("");
   const byp = p.byproducts.map((e) =>
-    `<tr><td class="mono ${kindClass(e.material.kind)}">${esc(e.material.id)}</td><td>${kindName(e.material.kind)}</td><td class="mono">${fmt(e.rate_per_min)}</td></tr>`).join("");
+    `<tr><td class="mono ${kindClass(e.material.kind)}">${esc(nm(e.material))}</td><td>${kindName(e.material.kind)}</td><td class="mono">${fmt(e.rate_per_min)}</td></tr>`).join("");
 
   return `
-    <h2>生产计划 · <span class="mono ${kindClass(p.target.kind)}">${esc(p.target.id)}</span>
+    <h2>生产计划 · <span class="mono ${kindClass(p.target.kind)}">${esc(nm(p.target))}</span>
       × <span class="mono">${fmt(p.rate_per_min)}</span>/min <span class="tag">${esc(p.mode)}</span></h2>
     <div class="plan-summary">${metrics}</div>
     <h3>配方步骤（按操作量降序）</h3>
     <table>
-      <thead><tr><th>op/min</th><th>机器/分类</th><th>配方</th><th>输入</th><th>输出</th></tr></thead>
+      <thead><tr><th>op/min</th><th>机器/分类</th><th>配方</th><th>机器数</th><th>EU/t</th><th>等级</th><th>输入</th><th>输出</th></tr></thead>
       <tbody>${recipes}</tbody>
     </table>
     <div class="grid-2" style="margin-top:14px">
@@ -246,8 +280,9 @@ async function runPlan() {
     const p = await api("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ material, rate, mode }),
+      body: JSON.stringify({ material, rate, mode, max_tier: $("#plan-tier").value || null }),
     });
+    lastPlan = p;
     box.innerHTML = renderPlan(p);
   } catch (e) {
     box.innerHTML = `<div class="placeholder">错误：${esc(e.message)}</div>`;
@@ -406,16 +441,18 @@ function layeredLayout(g) {
 function applyGraphView() {
   if (!lastGraph || !cy) return;
   const onlyMat = $("#graph-onlymat").checked;
-  const noLabels = $("#graph-nolabels").checked || lastGraph.nodes.length > 400;
+  const autoNoLabels = lastGraph.nodes.length > 400;
+  const noLabels = $("#graph-nolabels").checked || autoNoLabels;
   const filter = $("#graph-filter").value.trim().toLowerCase();
   const pos = layeredLayout(lastGraph);
 
   cy.startBatch();
   cy.elements().remove();
-  const elements = lastGraph.nodes.map((n) => ({
-    data: n.data,
-    position: pos.get(n.data.id) || { x: 0, y: 0 },
-  }));
+  const elements = lastGraph.nodes.map((n) => {
+    const d = { ...n.data };
+    d.label = lang === "zh" ? d.label_zh || d.label : d.label_en || d.label;
+    return { data: d, position: pos.get(n.data.id) || { x: 0, y: 0 } };
+  });
   elements.push(...lastGraph.edges);
   cy.add(elements);
 
@@ -449,6 +486,12 @@ function applyGraphView() {
   }
   cy.endBatch();
   cy.fit(cy.elements(":visible"), 40);
+  const status = $("#graph-status");
+  if (status) {
+    status.textContent =
+      (lastGraph.status || "") +
+      (autoNoLabels ? " · 节点过多，已自动隐藏标签（可用缩放查看局部）" : "");
+  }
 }
 
 async function loadGraph() {
@@ -466,14 +509,17 @@ async function loadGraph() {
   status.textContent = "加载中…";
   try {
     const d = await api(`/api/graph?${params}`);
-    lastGraph = { nodes: d.nodes, edges: d.edges, start: d.start };
+    lastGraph = {
+      nodes: d.nodes,
+      edges: d.edges,
+      start: d.start,
+      status:
+        `节点 ${d.nodes.length} / 边 ${d.edges.length}` +
+        (d.pruned_edges ? ` · 剪枝隐藏 ${d.pruned_edges} 条边` : "") +
+        (d.truncated ? " · 已达节点上限（可减小深度或提高上限）" : ""),
+    };
     ensureCy();
     applyGraphView();
-    status.textContent =
-      `节点 ${d.nodes.length} / 边 ${d.edges.length}` +
-      (d.pruned_edges ? ` · 剪枝隐藏 ${d.pruned_edges} 条边` : "") +
-      (d.truncated ? " · 已达节点上限（可减小深度或提高上限）" : "");
-    $("#footer-status").textContent = `图谱：${material}`;
   } catch (e) {
     status.textContent = "加载失败：" + e.message;
   }
@@ -499,4 +545,5 @@ $("#graph-filter").addEventListener("input", () => {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+setLang(lang, false);
 loadStats();

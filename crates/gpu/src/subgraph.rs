@@ -117,7 +117,7 @@ pub fn build_subgraph_from_plan(
             &mut recipe_outputs,
             &mut recipe_inputs,
         );
-        for alt in recipe_alternatives(g, an, m, Some(rid), alternatives_per_material) {
+        for alt in recipe_alternatives(g, an, m, Some(rid), alternatives_per_material, None) {
             add_recipe(
                 g,
                 an,

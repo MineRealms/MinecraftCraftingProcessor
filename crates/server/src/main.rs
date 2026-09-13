@@ -137,6 +137,12 @@ struct GraphNode {
 struct GraphNodeData {
     id: String,
     label: String,
+    /// 中文名（材料节点；缺失回退 label）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label_zh: Option<String>,
+    /// 英文名（材料节点；缺失回退 label）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label_en: Option<String>,
     node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     material_kind: Option<String>,
@@ -293,15 +299,19 @@ fn add_material_node(
     let mid = format!("m:{}", m);
     if seen.insert(mid.clone()) {
         let info = g.material(m);
+        let full = g.material_id_str(m);
+        let dto = g.material_dto(m);
         nodes.push(GraphNode {
             data: GraphNodeData {
                 id: mid,
                 label: info.display.clone(),
+                label_zh: Some(dto.display_zh),
+                label_en: Some(dto.display_en),
                 node_type: "material".to_string(),
                 material_kind: Some(g.kind_str(info.key.kind).to_string()),
                 category: None,
                 count: None,
-                mat_id: Some(g.material_id_str(m).to_string()),
+                mat_id: Some(full.to_string()),
             },
         });
         true
@@ -325,6 +335,8 @@ fn add_recipe_node(
             data: GraphNodeData {
                 id: rid_s,
                 label: r.id.clone(),
+                label_zh: None,
+                label_en: None,
                 node_type: "recipe".to_string(),
                 material_kind: None,
                 category: Some(cat.title.clone()),
@@ -564,6 +576,8 @@ struct PlanReq {
     max_iterations: Option<usize>,
     include_recycling: Option<bool>,
     block_amplification: Option<bool>,
+    /// 最大电压等级（LV/MV/… 或数字）
+    max_tier: Option<String>,
 }
 
 async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>, ApiError> {
@@ -579,6 +593,12 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
         let g = &state.graph;
         let an = &state.analysis;
         let m = resolve_material(g, &req.material, req.kind.as_deref().and_then(kind_from_str), req.nbt.as_deref())?;
+        let max_tier = req.max_tier.as_deref().and_then(|s| {
+            s.trim()
+                .parse::<u8>()
+                .ok()
+                .or_else(|| gt_planner_core::util::tier_index_from_name(s))
+        });
         let plan = match mode.as_str() {
             "beam" => {
                 let opts = BeamOptions {
@@ -587,6 +607,7 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                     max_iterations: req.max_iterations.unwrap_or(12),
                     sample_per_state: 24,
                     ops_penalty: 0.001,
+                    max_tier,
                 };
                 // GPU 批量评估（不可用则回退 CPU）
                 match gt_planner_gpu::GpuEvaluator::new() {
@@ -603,6 +624,7 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                 let opts = gt_planner_core::solver::ExactOptions {
                     include_recycling: req.include_recycling.unwrap_or(false),
                     block_amplification: req.block_amplification.unwrap_or(false),
+                    max_tier,
                     ..Default::default()
                 };
                 gt_planner_core::solver::plan_exact(g, an, m, req.rate, &opts)
@@ -613,6 +635,7 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
                     target: m,
                     rate_per_min: req.rate,
                     max_ops: 200_000,
+                    max_tier,
                 };
                 plan_tree(g, an, &preq)
             }
@@ -632,6 +655,7 @@ async fn api_plan(State(st): St, Json(req): Json<PlanReq>) -> Result<Json<Plan>,
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let mut data = std::env::var("GTP_DATA").unwrap_or_else(|_| "jei_recipes.json".to_string());
+    let mut names: Option<String> = std::env::var("GTP_NAMES").ok();
     let mut port: u16 = 8787;
     let mut web = "web".to_string();
     let mut i = 1;
@@ -640,6 +664,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--data" | "-d" => {
                 i += 1;
                 data = args.get(i).cloned().unwrap_or_default();
+            }
+            "--names" => {
+                i += 1;
+                names = args.get(i).cloned();
             }
             "--port" | "-p" => {
                 i += 1;
@@ -657,17 +685,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_path = PathBuf::from(&data);
     if !data_path.exists() {
         eprintln!("找不到数据文件：{}", data_path.display());
-        eprintln!("用法: gt-planner-server --data <jei_recipes.json> [--port 8787] [--web web]");
+        eprintln!("用法: gt-planner-server --data <jei_recipes.json> [--names <jei_names.json>] [--port 8787] [--web web]");
         std::process::exit(1);
     }
+    // 名称文件：显式参数 > 与配方同目录的 jei_names.json
+    let names_path = names
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            let sibling = data_path.with_file_name("jei_names.json");
+            sibling.exists().then_some(sibling)
+        });
 
     eprintln!("加载 {} ...", data_path.display());
     let t0 = Instant::now();
-    let graph = gt_planner_core::parser::load_file(&data_path)?;
+    let graph = match &names_path {
+        Some(np) => {
+            eprintln!("加载名称库 {} ...", np.display());
+            gt_planner_core::parser::load_with_names(&data_path, np)?
+        }
+        None => gt_planner_core::parser::load_file(&data_path)?,
+    };
     eprintln!(
-        "构图完成：{} 材料 / {} 配方（{:.2}s）",
+        "构图完成：{} 材料 / {} 配方 / {} 名称（{:.2}s）",
         graph.stats.material_count,
         graph.stats.recipe_count,
+        graph.names.len(),
         t0.elapsed().as_secs_f64()
     );
     let analysis = Analysis::build(&graph);

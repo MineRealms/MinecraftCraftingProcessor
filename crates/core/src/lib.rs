@@ -11,6 +11,7 @@ pub mod error;
 pub mod graph;
 pub mod intern;
 pub mod model;
+pub mod names;
 pub mod parser;
 pub mod plan;
 pub mod planner;
@@ -22,9 +23,10 @@ pub use analysis::Analysis;
 pub use error::{Error, Result};
 pub use graph::{DatasetMeta, GraphStats, KnowledgeGraph};
 pub use model::{
-    CategoryId, IngredientDto, MaterialDto, MaterialId, MaterialKind, MaterialKey, RecipeId,
-    RecipeNode, Slot, SlotDto,
+    CategoryId, EnergyIo, GtRecipeInfo, IngredientDto, MaterialDto, MaterialId, MaterialKind,
+    MaterialKey, RecipeId, RecipeNode, Slot, SlotDto,
 };
+pub use names::{NameEntry, NameStore};
 pub use plan::{Plan, PlanEntry, PlanTotals, PlannedRecipe};
 pub use planner::{
     plan_beam, plan_beam_with_evaluator, plan_tree, BatchEvaluator, BeamOptions, PlanRequest,

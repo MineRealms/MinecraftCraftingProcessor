@@ -28,8 +28,18 @@ pub struct PlannedRecipe {
     pub category_title: String,
     /// 每分钟执行次数。
     pub ops_per_min: f64,
-    /// 机器数量（需配方时长覆盖层；缺失时为 null）。
+    /// 机器数量 = ops/min × duration_ticks / 1200（需 GT 时长数据）。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_count: Option<f64>,
+    /// 单机功率 EU/t（eut × amperage；发电配方为发电功率）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eut: Option<f64>,
+    /// 电压等级（LV/MV/…）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// 该步骤每分钟耗电（EU/min；发电为负向贡献前的正值）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eu_per_min: Option<f64>,
     /// 实际选中的输入候选与速率。
     pub inputs: Vec<PlanEntry>,
     /// 全部主输出与速率（含副产物）。
@@ -52,4 +62,14 @@ pub struct PlanTotals {
     pub raw_fluids_mb_per_min: f64,
     /// 估算成本（原始物品当量；流体按桶计）。
     pub estimated_cost: f64,
+    /// 机器总数（Σ machine_count，含所有步骤）。
+    pub total_machines: f64,
+    /// 净功率 EU/t（耗电 − 发电）。
+    pub net_eu_t: f64,
+    /// 总耗电 EU/t（不含发电）。
+    pub consume_eu_t: f64,
+    /// 总发电 EU/t。
+    pub generate_eu_t: f64,
+    /// 每分钟净能量（EU/min，耗电 − 发电）。
+    pub net_eu_per_min: f64,
 }

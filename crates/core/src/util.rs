@@ -148,3 +148,30 @@ pub fn cost_strictly_less(a: f64, b: f64) -> bool {
     }
     a < b - tie_tol(a, b)
 }
+
+/// 配方是否满足最大电压等级约束。
+/// - `max_tier = None`：不限制；
+/// - 配方无 GT 等级数据（原版合成等）：不限制；
+/// - 有等级：`tier_index <= max_tier`。
+pub fn tier_allowed(g: &KnowledgeGraph, rid: crate::model::RecipeId, max_tier: Option<u8>) -> bool {
+    let Some(max) = max_tier else {
+        return true;
+    };
+    match g.recipe(rid).gt.as_ref().and_then(|gt| gt.tier_index) {
+        Some(t) => t <= max,
+        None => true,
+    }
+}
+
+/// 电压等级名 → 序号（LV=1 …）。
+pub fn tier_index_from_name(name: &str) -> Option<u8> {
+    const TIERS: [&str; 15] = [
+        "ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UXV",
+        "OpV", "MAX",
+    ];
+    let up = name.trim();
+    TIERS
+        .iter()
+        .position(|t| t.eq_ignore_ascii_case(up))
+        .map(|i| i as u8)
+}
