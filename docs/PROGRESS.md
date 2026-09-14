@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- 最新提交：`M11 日志 / 性能计数器 / 运行记录 + 前端选项`
-- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 15 + gpu 3 个单测全过）
-- 规划模式：tree / beam（GPU BiCGSTAB 粗筛）/ mcts / exact；全部带性能计数器
-- 前端：高级选项（beam/MCTS/回收/放大环）、运行指标面板、运行历史（点击回填）、概率产出徽章
+- 最新提交：`M12 学术化 README + Benchmark 图表`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 15 + gpu 3 单测全过）
+- README：CRN 形式化（化学计量矩阵 / SCC 商图 / Bellman 价值函数 / Pareto / LP-MILP / Petri 网映射）
+  + 6 张基准图表（`docs/bench/`，由 `scripts/gen_benchmarks.py` 生成）
 
 ## 里程碑看板
 
@@ -72,6 +72,16 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M12 学术化 README + Benchmark 图表 ✅
+- [x] README 重写为论文风格：问题定义（CRN / 化学计量矩阵）→ 数学形式化（SCC 商图、
+      cycle-safe 价值函数、多目标 Pareto、LP/MILP、chance constraint、Timed Stochastic Petri Net 映射）
+      → 算法 → 工程 → Benchmarks → 路线图
+- [x] `scripts/gen_benchmarks.py` 生成 6 张基准图（`docs/bench/`）：
+      求解质量对比 / 规模扩展（log-log）/ Pareto 前沿 / GPU 加速 + BiCGSTAB 收敛 /
+      SCC 规模分布 + 分类分布 / LP 下界 gap
+- [x] README 末尾标注：§5 基准数据为**基准模拟（synthetic baseline）**，真实实测值见 §7
+- [x] 提交 + 推送
 
 ### M11 日志 / 性能计数器 / 运行记录 ✅
 - [x] **结构化日志**：core/gpu 关键路径 `log` 埋点（构图、Search IR、LP、BiCGSTAB 批量）；
