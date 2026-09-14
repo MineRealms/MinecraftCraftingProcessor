@@ -10,3 +10,7 @@ Thumbs.db
 *.tmp
 jei_recipes.json
 recipe_times.json
+
+# 运行时产物
+logs/
+*.jsonl
