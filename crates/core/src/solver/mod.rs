@@ -125,10 +125,18 @@ fn recipe_gain(g: &KnowledgeGraph, an: &Analysis, r: &crate::model::RecipeNode) 
     }
 }
 
-/// 材料展开优先级：(深度, 最优生产者成本) 字典序。
-/// 深度优先保证"接近源材料"的路线先进入子图（避免预算被
-/// 封闭转换家族耗尽）；成本用于同深度内的排序。
-fn heap_prio(g: &KnowledgeGraph, an: &Analysis, opts: &ExactOptions, m: MaterialId) -> u64 {
+/// 材料展开优先级：(距目标距离, 深度, 最优生产者成本) 字典序。
+/// 距离优先保证目标自身的生产链先于全图其他材料进入子图——
+/// 在大型数据集上（材料数万），按"深度"排序会让浅层材料耗尽
+/// 子图预算，目标的深链被截断（表现为链中材料被迫按惩罚价外购）。
+/// 同层内再用深度（接近源材料）与成本排序。
+fn heap_prio(
+    g: &KnowledgeGraph,
+    an: &Analysis,
+    opts: &ExactOptions,
+    m: MaterialId,
+    dist: u32,
+) -> u64 {
     let depth = an.cost.depth[m as usize].min(0xffff) as u64;
     let mut best = f64::INFINITY;
     for &rid in &g.producers[m as usize] {
@@ -147,7 +155,7 @@ fn heap_prio(g: &KnowledgeGraph, an: &Analysis, opts: &ExactOptions, m: Material
         }
     }
     let score_bits = best.to_bits() >> 32; // 取高 32 位（非负浮点保持单调）
-    (depth << 32) | score_bits
+    ((dist.min(0xffff) as u64) << 48) | (depth << 32) | score_bits
 }
 
 /// 精确求解：返回 Plan 或错误信息。
@@ -172,6 +180,10 @@ pub fn plan_exact(
     let mut skipped_amplifying = 0usize;
     let m_count = g.materials.len();
 
+    // 距目标距离（沿"生产者→输入"方向 BFS），用于子图展开排序
+    let mut dist: Vec<u32> = vec![u32::MAX; m_count];
+    dist[target as usize] = 0;
+
     // best-first：优先展开"最优路线成本最低"的材料；
     // 每个材料展开全部可用生产者（每材料上限 32）。
     // 为什么不能只取 top-N：纯按启发式成本排序会陷入封闭转换家族
@@ -179,7 +191,10 @@ pub fn plan_exact(
     // 保证便宜家族与矿石链都能进入子图（受总配方预算约束）。
     let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u64, MaterialId)>> =
         std::collections::BinaryHeap::new();
-    heap.push(std::cmp::Reverse((heap_prio(g, an, opts, target), target)));
+    heap.push(std::cmp::Reverse((
+        heap_prio(g, an, opts, target, 0),
+        target,
+    )));
 
     while let Some(std::cmp::Reverse((_, m))) = heap.pop() {
         // 可用生产者（回收/tier 过滤）
@@ -202,11 +217,18 @@ pub fn plan_exact(
 
         let mut added = 0usize;
         for &(_, rid) in &prods {
+            let dbg_rec = std::env::var_os("GTP_DEBUG_SOLVER").is_some()
+                && std::env::var("GTP_DEBUG_RECIPE")
+                    .map(|p| g.recipe(rid).id.contains(&p))
+                    .unwrap_or(false);
             if rec_index.contains_key(&rid) {
                 continue;
             }
             let r = g.recipe(rid);
             if r.inputs.is_empty() || r.outputs.is_empty() {
+                if dbg_rec {
+                    eprintln!("solver: skip {} 空输入/输出", r.id);
+                }
                 continue;
             }
             if opts.block_amplification {
@@ -227,18 +249,33 @@ pub fn plan_exact(
             for slot in &r.inputs {
                 let mut alts: Vec<(usize, u64, f64)> = Vec::new(); // (local, qty, score)
                 for &(im, q) in &slot.alts {
-                    let li = match mat_index.get(&im) {
-                        Some(&li) => li,
-                        None => {
-                            if materials.len() >= opts.max_materials {
-                                truncated = true;
-                                usable = false;
-                                break;
+                let li = match mat_index.get(&im) {
+                    Some(&li) => li,
+                    None => {
+                        if materials.len() >= opts.max_materials {
+                            truncated = true;
+                            usable = false;
+                            if dbg_rec {
+                                eprintln!(
+                                    "solver:   {} 材料上限命中（{} >= {}）",
+                                    r.id,
+                                    materials.len(),
+                                    opts.max_materials
+                                );
                             }
+                            break;
+                        }
                             let li = materials.len();
                             materials.push(im);
                             mat_index.insert(im, li);
-                            heap.push(std::cmp::Reverse((heap_prio(g, an, opts, im), im)));
+                            let nd = dist[m as usize].saturating_add(1);
+                            if nd < dist[im as usize] {
+                                dist[im as usize] = nd;
+                            }
+                            heap.push(std::cmp::Reverse((
+                                heap_prio(g, an, opts, im, dist[im as usize]),
+                                im,
+                            )));
                             li
                         }
                     };
@@ -250,6 +287,14 @@ pub fn plan_exact(
                     break;
                 }
                 if alts.is_empty() {
+                    if dbg_rec {
+                        eprintln!(
+                            "solver:   {} 槽 alts 为空（slot.alts={}，材料数={}）",
+                            r.id,
+                            slot.alts.len(),
+                            materials.len()
+                        );
+                    }
                     usable = false;
                     break;
                 }
@@ -267,6 +312,9 @@ pub fn plan_exact(
                 }
             }
             if !usable {
+                if dbg_rec {
+                    eprintln!("solver: skip {} 输入不可用（材料上限/空槽）", r.id);
+                }
                 continue;
             }
             let mut outputs: Vec<(usize, f64)> = Vec::new();
@@ -284,13 +332,23 @@ pub fn plan_exact(
                         let lo = materials.len();
                         materials.push(om);
                         mat_index.insert(om, lo);
-                        heap.push(std::cmp::Reverse((heap_prio(g, an, opts, om), om)));
+                        let nd = dist[m as usize].saturating_add(1);
+                        if nd < dist[om as usize] {
+                            dist[om as usize] = nd;
+                        }
+                        heap.push(std::cmp::Reverse((
+                            heap_prio(g, an, opts, om, dist[om as usize]),
+                            om,
+                        )));
                         lo
                     }
                 };
                 outputs.push((lo, oq as f64 * g.output_chance(rid, om)));
             }
             if outputs.is_empty() {
+                if dbg_rec {
+                    eprintln!("solver: skip {} 无产出槽", r.id);
+                }
                 continue;
             }
             rec_index.insert(rid, lp_recipes.len());
@@ -321,6 +379,46 @@ pub fn plan_exact(
     }
 
     // ---------- 2) 构建 LP ----------
+    if std::env::var_os("GTP_DEBUG_SOLVER").is_some() {
+        if let Ok(pat) = std::env::var("GTP_DEBUG_MAT") {
+            if g.material_id_str(target).contains(&pat) {
+                eprintln!("solver: 子图诊断 target={} recipes={}", g.material_id_str(target), lp_recipes.len());
+                for r in &lp_recipes {
+                    if !r.outputs.iter().any(|&(li, _)| li == 0) {
+                        continue;
+                    }
+                    let recipe = g.recipe(r.rid);
+                    eprintln!("solver:   配方 {}", recipe.id);
+                    for input in &r.inputs {
+                        let check = |im: MaterialId, q: u64| {
+                            let in_sub = g.producers[im as usize]
+                                .iter()
+                                .filter(|&&p| rec_index.contains_key(&p))
+                                .count();
+                            eprintln!(
+                                "solver:     输入 {} x{} is_source={} 子图内生产者={} 全图生产者={}",
+                                g.material_id_str(im),
+                                q,
+                                g.is_source(im),
+                                in_sub,
+                                g.producers[im as usize].len()
+                            );
+                        };
+                        match input {
+                            LpInput::Direct { material, qty } => {
+                                check(materials[*material], *qty as u64)
+                            }
+                            LpInput::Choice { alts } => {
+                                for &(li, q) in alts {
+                                    check(materials[li], q as u64)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut vars = ProblemVariables::new();
     let ops_vars: Vec<good_lp::Variable> = lp_recipes
         .iter()
@@ -492,6 +590,24 @@ pub fn plan_exact(
             solution.eval(&objective),
             manual
         );
+        for (i, &v) in ext_vars.iter().enumerate() {
+            let x = solution.value(v);
+            if x > 1e-9 {
+                let m = materials[i];
+                eprintln!(
+                    "solver: ext>0 {} = {:.4} (is_raw={})",
+                    g.material_id_str(m),
+                    x,
+                    g.is_source(m)
+                );
+            }
+        }
+        for (ri, r) in lp_recipes.iter().enumerate() {
+            let x = solution.value(ops_vars[ri]);
+            if x > 1e-9 {
+                eprintln!("solver: ops>0 {} = {:.4}", g.recipe(r.rid).id, x);
+            }
+        }
     }
 
     // ---------- 4) 提取结果 ----------

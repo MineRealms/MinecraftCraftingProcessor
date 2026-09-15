@@ -303,12 +303,16 @@ impl Builder {
         // - diagram：矿石处理流程图页（含机器催化剂等虚拟输入）
         // - tag_recipes：标签成员列表页（一个巨槽列全部成员，不是真实转换）
         // - *_info：结构/机器信息页（如 multiblock_info）
+        // - uncrafting：拆解配方（逆向合成，会让整个物品图变成巨型强连通分量）
         let plannable: Vec<bool> = self
             .recipes
             .iter()
             .map(|r| {
                 let ty = &self.categories[r.category as usize].ty;
-                !ty.contains("diagram") && !ty.contains("tag_recipes") && !ty.ends_with("_info")
+                !ty.contains("diagram")
+                    && !ty.contains("tag_recipes")
+                    && !ty.contains("uncrafting")
+                    && !ty.ends_with("_info")
             })
             .collect();
 
@@ -496,5 +500,36 @@ mod tests {
         let hits = g.search("block", None, 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(g.material_id_str(hits[0]), "test:block");
+    }
+
+    #[test]
+    fn uncrafting_category_excluded() {
+        let json = r#"{
+          "format": "gtmfo_jei_recipes",
+          "version": 1,
+          "minecraft_version": "1.20.1",
+          "categories": [
+            {
+              "type": "twilightforest:uncrafting",
+              "title": "拆解",
+              "recipe_class": "com.example.Recipe",
+              "catalysts": [],
+              "recipes": [
+                {
+                  "id": "twilightforest:uncrafting/a",
+                  "inputs": [{"ingredients": [{"type": "item", "id": "test:block", "count": 1}]}],
+                  "outputs": [{"ingredients": [{"type": "item", "id": "test:dust", "count": 4}]}]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let g = from_json_str(json).unwrap();
+        let rid = *g
+            .recipe_index
+            .get(&(0, "twilightforest:uncrafting/a".to_string()))
+            .unwrap();
+        assert!(!g.is_plannable(rid));
+        assert_eq!(g.stats.plannable_recipe_count, 0);
     }
 }

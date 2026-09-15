@@ -5,8 +5,9 @@
 
 ## 当前状态
 
-- 最新提交：`M12 学术化 README + Benchmark 图表`
-- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 15 + gpu 3 单测全过）
+- 最新提交：`M13 sunlit 数据集适配（拆解过滤 + LP 子图排序修复）`
+- 编译状态：✅ `cargo build --workspace` + `cargo test`（core 16 + gpu 3 单测全过）
+- 数据集：sunlit 整合包（189.9MB / 87,846 材料 / 116,254 配方 / 177 分类 / 233 命名空间）
 - README：CRN 形式化（化学计量矩阵 / SCC 商图 / Bellman 价值函数 / Pareto / LP-MILP / Petri 网映射）
   + 6 张基准图表（`docs/bench/`，由 `scripts/gen_benchmarks.py` 生成）
 
@@ -72,6 +73,18 @@
 cargo run -p gt-planner-server --release -- --data H:\Tools\jei_recipes.json
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### M13 sunlit 数据集适配 ✅
+- [x] 拆解配方过滤：`twilightforest:uncrafting`（16,813 条）排除出可规划集
+      —— 逆向合成会把物品图变成巨型强连通分量，破坏成本定价与 LP 子图
+      （可规划配方 103,256 → 86,443；新增解析器测试 `uncrafting_category_excluded`）
+- [x] LP 子图展开排序修复：`heap_prio` 由“到源深度”改为 **“距目标距离”优先**
+      —— 87k 材料规模下，浅层材料会先耗尽 6000 材料预算，目标的深链被截断，
+      表现为链中材料被迫按 1000×惩罚价外购、LP 退化为“直接买目标”
+- [x] 解析 190MB 数据实测：6.2s / 峰值内存 950MB
+- [x] 规划模式验证：tree 1.9ms / mcts 299ms / beam 613ms（含 GPU 评估）
+- [x] 已知限制：本导出无 GTCEu 机器配方与 gt 数据块 → GT 目标不可规划；
+      LP 在无耗电/概率数据时会利用战利品类配方（鱼塘/捕蟹笼）与放大环 → 建议 tree/beam
 
 ### M12 学术化 README + Benchmark 图表 ✅
 - [x] README 重写为论文风格：问题定义（CRN / 化学计量矩阵）→ 数学形式化（SCC 商图、
